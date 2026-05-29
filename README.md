@@ -1,9 +1,6 @@
-# culture-agent-template
+# reachy-mini-cli
 
-Template repository for creating Culture agents with a consistent structure,
-lifecycle, skills, and operating contract. Clone it, rename the package, edit
-`culture.yaml`, and you have a new [AgentCulture](https://github.com/agentculture)
-mesh agent that `steward doctor` recognizes.
+Agent and CLI for operating the Reachy Mini expressive robot — device setup, app management, and runtime ops.
 
 ## What you get
 
@@ -21,8 +18,8 @@ mesh agent that `steward doctor` recognizes.
 ```bash
 uv sync
 uv run pytest -n auto                 # run the test suite
-uv run culture-agent-template whoami  # identity from culture.yaml
-uv run culture-agent-template learn   # self-teaching prompt (add --json)
+uv run reachy-mini-cli whoami  # identity from culture.yaml
+uv run reachy-mini-cli learn   # self-teaching prompt (add --json)
 uv run teken cli doctor . --strict    # the agent-first rubric gate CI runs
 ```
 
@@ -43,7 +40,7 @@ error, `3+` reserved.
 
 ## Make it your own
 
-1. Rename the package `culture_agent_template/` and the `culture-agent-template`
+1. Rename the package `reachy/` and the `reachy-mini-cli`
    CLI/dist name throughout `pyproject.toml`, the package, `tests/`, and
    `sonar-project.properties`.
 2. Edit `culture.yaml` with your `suffix` and `backend`.
