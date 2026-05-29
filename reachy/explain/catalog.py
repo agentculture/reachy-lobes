@@ -1,7 +1,10 @@
 """Markdown catalog for ``reachy-mini-cli explain <path>``.
 
-Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple
-and ``("reachy-mini-cli",)`` both resolve to the root entry.
+Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple,
+``("reachy",)`` (the installed console-script name, from ``[project.scripts]``),
+and ``("reachy-mini-cli",)`` (the display name used throughout the help text)
+all resolve to the root entry. The agent-first rubric's ``explain_self`` check
+runs ``explain <script-name>``, so the ``("reachy",)`` key is load-bearing.
 
 Keep bodies self-contained: an agent reading one entry should get enough
 context without chaining reads.
@@ -118,6 +121,7 @@ itself (distinct from the global `overview`, which describes the agent).
 
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
+    ("reachy",): _ROOT,
     ("reachy-mini-cli",): _ROOT,
     ("whoami",): _WHOAMI,
     ("learn",): _LEARN,
