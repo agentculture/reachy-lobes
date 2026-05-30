@@ -1,6 +1,6 @@
 [project]
 name = "reachy-cli"
-version = "0.1.2"
+version = "0.2.0"
 description = "Agent and CLI for operating the Reachy Mini expressive robot — device setup, app management, and runtime ops."
 readme = "README.md"
 license = "MIT"
@@ -14,6 +14,12 @@ classifiers = [
     "Intended Audience :: Developers",
 ]
 dependencies = []
+
+# Optional "sdk" transport flavor. The default install stays dependency-free
+# (the http transport uses only the stdlib); installing the extra enables
+# `--transport sdk`, which drives the robot through the in-process client.
+[project.optional-dependencies]
+sdk = ["reachy-mini>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/agentculture/reachy-mini-cli"

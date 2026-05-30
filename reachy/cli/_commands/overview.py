@@ -30,6 +30,9 @@ _VERBS = [
     "explain <path> — markdown docs for a topic",
     "overview — this descriptive snapshot",
     "doctor — check the agent-identity invariants",
+    "device <verb> — daemon/robot status and live state",
+    "app <verb> — list/start/stop Reachy Mini apps",
+    "move <verb> — runtime motion (goto, wake, sleep)",
 ]
 
 

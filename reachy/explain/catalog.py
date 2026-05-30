@@ -30,6 +30,16 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `reachy-mini-cli doctor` — check the agent-identity invariants.
 - `reachy-mini-cli cli overview` — describe the CLI surface.
 
+## Robot nouns
+
+- `reachy-mini-cli device <verb>` — daemon/robot status and live state.
+- `reachy-mini-cli app <verb>` — list/start/stop Reachy Mini apps.
+- `reachy-mini-cli move <verb>` — runtime motion (goto, wake, sleep).
+
+Robot verbs speak to the Reachy daemon over a transport flavor (`--transport
+http` by default, `sdk` optional). A missing daemon yields a clean exit-2 error,
+never a traceback.
+
 ## Exit-code policy
 
 - `0` success
@@ -118,6 +128,93 @@ itself (distinct from the global `overview`, which describes the agent).
     reachy-mini-cli cli overview --json
 """
 
+_TRANSPORTS = """\
+## Transports
+
+Robot verbs reach the robot through a selectable flavor:
+
+- `http` (default) — the Reachy daemon's REST API (default
+  `http://localhost:8000`, override with `--base-url` or `REACHY_BASE_URL`).
+  Uses only the standard library, so the CLI stays dependency-free.
+- `sdk` — the in-process `reachy_mini` client; needs the optional `[sdk]` extra
+  (`pip install 'reachy-cli[sdk]'`). Covers motion/state; daemon and app verbs
+  require `http`.
+
+Select with `--transport {http,sdk}` (or `REACHY_TRANSPORT`). If the daemon is
+unreachable, the command exits 2 with an `error:`/`hint:` pair — no traceback.
+"""
+
+_DEVICE = """\
+# reachy-mini-cli device
+
+Device setup and status for the Reachy Mini.
+
+## Verbs
+
+- `reachy-mini-cli device status` — daemon status (state, version,
+  wireless/lite, simulation, IP). Calls `GET /api/daemon/status`.
+- `reachy-mini-cli device state` — live robot state: head pose, antenna
+  positions, body yaw, direction-of-arrival. Calls `GET /api/state/full`.
+- `reachy-mini-cli device overview` — this summary.
+
+{transports}
+
+## Usage
+
+    reachy-mini-cli device status
+    reachy-mini-cli device state --json
+    reachy-mini-cli device status --base-url http://reachy.local:8000
+""".replace("{transports}", _TRANSPORTS)
+
+_APP = """\
+# reachy-mini-cli app
+
+Manage Reachy Mini apps (daemon-side; requires `--transport http`).
+
+## Verbs
+
+- `reachy-mini-cli app list` — available apps, installed and installable.
+  Calls `GET /api/apps/list-available`.
+- `reachy-mini-cli app status` — the currently running app, if any.
+- `reachy-mini-cli app start <name>` — start an installed app by name.
+- `reachy-mini-cli app stop` — stop the currently running app.
+- `reachy-mini-cli app overview` — this summary.
+
+{transports}
+
+## Usage
+
+    reachy-mini-cli app list
+    reachy-mini-cli app start my-app
+    reachy-mini-cli app stop --json
+""".replace("{transports}", _TRANSPORTS)
+
+_MOVE = """\
+# reachy-mini-cli move
+
+Runtime motion. `goto` takes friendly units — millimetres for translation,
+degrees for rotation — converted to the daemon's metres + radians.
+
+## Verbs
+
+- `reachy-mini-cli move goto` — move head/antennas to a target. Flags:
+  `--x/--y/--z` (mm), `--roll/--pitch/--yaw` (deg), `--antennas RIGHT LEFT`
+  (deg), `--body-yaw` (deg), `--duration` (s, default 2.0),
+  `--interpolation {minjerk,linear,ease,cartoon}`. Calls `POST /api/move/goto`.
+- `reachy-mini-cli move wake` — play the wake-up animation.
+- `reachy-mini-cli move sleep` — play the go-to-sleep animation.
+- `reachy-mini-cli move overview` — this summary.
+
+{transports}
+
+## Usage
+
+    reachy-mini-cli move goto --z 10 --pitch -5 --duration 2
+    reachy-mini-cli move goto --antennas 30 -30 --duration 1
+    reachy-mini-cli move wake
+    reachy-mini-cli move sleep --json
+""".replace("{transports}", _TRANSPORTS)
+
 
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
@@ -130,4 +227,19 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("doctor",): _DOCTOR,
     ("cli",): _CLI,
     ("cli", "overview"): _CLI,
+    ("device",): _DEVICE,
+    ("device", "overview"): _DEVICE,
+    ("device", "status"): _DEVICE,
+    ("device", "state"): _DEVICE,
+    ("app",): _APP,
+    ("app", "overview"): _APP,
+    ("app", "list"): _APP,
+    ("app", "status"): _APP,
+    ("app", "start"): _APP,
+    ("app", "stop"): _APP,
+    ("move",): _MOVE,
+    ("move", "overview"): _MOVE,
+    ("move", "goto"): _MOVE,
+    ("move", "wake"): _MOVE,
+    ("move", "sleep"): _MOVE,
 }
