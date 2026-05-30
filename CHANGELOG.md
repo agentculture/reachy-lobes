@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-30
+
+### Added
+
+- `device` noun group: `status` (daemon status), `state` (live robot state)
+- `app` noun group: `list`, `status`, `start <name>`, `stop`
+- `move` noun group: `goto` (mm + degrees; `--antennas`/`--body-yaw`/`--duration`/`--interpolation`), `wake`, `sleep`
+- Robot transport layer with two selectable flavors: `http` (stdlib-only daemon REST client, default) and `sdk` (optional `reachy_mini` client behind the `[sdk]` extra), via `--transport` / `REACHY_TRANSPORT`
+- `explain` catalog entries and `overview`/`learn` command maps for the new robot nouns
+
+### Changed
+
+- README documents robot operations, transports, and the [sdk] optional extra
+
 ## [0.1.2] - 2026-05-30
 
 ### Changed

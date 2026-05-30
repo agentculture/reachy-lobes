@@ -30,6 +30,12 @@ Commands
   reachy-mini-cli doctor             Check the agent-identity invariants.
   reachy-mini-cli cli overview       Describe the CLI surface itself.
 
+Robot commands (talk to the Reachy daemon; --transport http|sdk)
+  reachy-mini-cli device status      Daemon status / device info.
+  reachy-mini-cli device state       Live robot state (pose, antennas).
+  reachy-mini-cli app list           Available apps; also: status/start/stop.
+  reachy-mini-cli move goto ...      Move head/antennas; also: wake/sleep.
+
 Machine-readable output
 -----------------------
 Every command supports --json. Errors in JSON mode emit
@@ -60,6 +66,10 @@ def _as_json_payload() -> dict[str, object]:
             {"path": ["overview"], "summary": "Descriptive snapshot of the agent."},
             {"path": ["doctor"], "summary": "Check the agent-identity invariants."},
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
+            {"path": ["device", "status"], "summary": "Daemon status / device info."},
+            {"path": ["device", "state"], "summary": "Live robot state."},
+            {"path": ["app", "list"], "summary": "List/start/stop Reachy Mini apps."},
+            {"path": ["move", "goto"], "summary": "Move head/antennas; wake/sleep."},
         ],
         "exit_codes": {
             "0": "success",

@@ -38,6 +38,45 @@ Every command supports `--json`. Results go to stdout, errors/diagnostics to
 stderr (never mixed). Exit codes: `0` success, `1` user error, `2` environment
 error, `3+` reserved.
 
+## Robot operations
+
+The `device`, `app`, and `move` noun groups operate the Reachy Mini. They talk
+to the robot through a selectable **transport flavor**:
+
+- **`http`** (default) — the Reachy daemon's REST API. Uses only the Python
+  standard library, so the default install keeps **zero runtime dependencies**.
+  Point it at a daemon with `--base-url` or `REACHY_BASE_URL` (default
+  `http://localhost:8000`).
+- **`sdk`** — the in-process `reachy_mini` client. Install the optional extra:
+  `pip install 'reachy-cli[sdk]'`. Covers motion/state; daemon and app verbs
+  still require `http`.
+
+Select per command with `--transport {http,sdk}` (or `REACHY_TRANSPORT`). Action
+verbs also accept `--timeout`. If no daemon is reachable, the command exits `2`
+with a clean `error:`/`hint:` pair — never a traceback.
+
+| Verb | What it does |
+|------|--------------|
+| `device status` | Daemon status: state, version, wireless/lite, simulation, IP. |
+| `device state` | Live robot state: head pose, antenna positions, body yaw. |
+| `app list` | Available apps (installed and installable). |
+| `app status` | The currently running app, if any. |
+| `app start <name>` | Start an installed app by name. |
+| `app stop` | Stop the currently running app. |
+| `move goto` | Move head/antennas (mm + degrees); see `reachy explain move` for flags. |
+| `move wake` | Play the wake-up animation. |
+| `move sleep` | Play the go-to-sleep animation. |
+
+Each noun also exposes `overview` (e.g. `reachy move overview`).
+
+```bash
+# Start the daemon (from the reachy_mini SDK), then:
+uv run reachy device status
+uv run reachy app list --json
+uv run reachy move goto --z 10 --pitch -5 --duration 2
+uv run reachy move wake
+```
+
 ## Make it your own
 
 1. Rename the package `reachy/` and the `reachy-mini-cli`
