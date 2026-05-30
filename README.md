@@ -63,7 +63,7 @@ with a clean `error:`/`hint:` pair — never a traceback.
 | `app status` | The currently running app, if any. |
 | `app start <name>` | Start an installed app by name. |
 | `app stop` | Stop the currently running app. |
-| `move goto` | Move head/antennas (mm + degrees) — `--x/--y/--z`, `--roll/--pitch/--yaw`, `--antennas R L`, `--body-yaw`, `--duration`, `--interpolation`. |
+| `move goto` | Move head/antennas (mm + degrees); see `reachy explain move` for flags. |
 | `move wake` | Play the wake-up animation. |
 | `move sleep` | Play the go-to-sleep animation. |
 

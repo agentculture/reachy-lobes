@@ -117,6 +117,15 @@ def add_robot_args(parser: argparse.ArgumentParser) -> None:
 def get_transport(args: argparse.Namespace) -> Transport:
     """Build the transport selected by ``args`` (see :func:`add_robot_args`)."""
     transport = getattr(args, "transport", "http")
+    # argparse ``choices`` only validate CLI tokens, not the env-var default, so
+    # re-check here to fail loud on e.g. REACHY_TRANSPORT=sdk2 instead of
+    # silently falling through to http.
+    if transport not in TRANSPORTS:
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"unknown transport {transport!r}",
+            remediation=f"set --transport / REACHY_TRANSPORT to one of: {', '.join(TRANSPORTS)}",
+        )
     if transport == "sdk":
         from reachy.robot.sdk_transport import SdkTransport
 

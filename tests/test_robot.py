@@ -204,6 +204,16 @@ def test_bad_base_url_is_user_error(monkeypatch, capsys: pytest.CaptureFixture[s
     assert "http" in capsys.readouterr().err
 
 
+def test_invalid_transport_env_fails_loud(monkeypatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # argparse choices don't validate the env-var default; get_transport must.
+    monkeypatch.setenv("REACHY_TRANSPORT", "bogus")
+    rc = main(["device", "status"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unknown transport" in err
+    assert "hint:" in err
+
+
 # --- overviews ------------------------------------------------------------
 
 

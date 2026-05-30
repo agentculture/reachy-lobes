@@ -11,6 +11,10 @@ where the in-process ``ReachyMini`` client adds value, and inherits the base
 * the default install stays dependency-free (``dependencies = []``); the SDK
   lives behind the ``[sdk]`` optional extra; and
 * operations that don't need the SDK never trigger the import.
+
+Adding this third-party runtime import is a deliberate, contained exception to
+the zero-runtime-dependency rule in ``CLAUDE.md`` — see
+``docs/adr-0001-sdk-transport-extra.md``.
 """
 
 from __future__ import annotations

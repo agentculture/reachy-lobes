@@ -16,34 +16,42 @@ from reachy.robot import add_robot_args, get_transport
 __all__ = ["add_robot_args", "get_transport", "emit_payload", "noun_overview"]
 
 
+def _dict_lines(data: dict, indent: int) -> list[str]:
+    pad = "  " * indent
+    lines: list[str] = []
+    for key, value in data.items():
+        if isinstance(value, (dict, list)):
+            lines.append(f"{pad}{key}:")
+            lines.extend(_text_lines(value, indent + 1))
+        else:
+            lines.append(f"{pad}{key}: {value}")
+    return lines
+
+
+def _item_lines(item: Any, indent: int) -> list[str]:
+    pad = "  " * indent
+    if not isinstance(item, dict):
+        return [f"{pad}- {item}"]
+    head = item.get("name") or item.get("id")
+    if not head:
+        return _text_lines(item, indent + 1)
+    rest = {k: v for k, v in item.items() if k != "name"}
+    return [f"{pad}- {head}", *_text_lines(rest, indent + 1)]
+
+
 def _text_lines(data: Any, indent: int = 0) -> list[str]:
     """Render a JSON-ish value as readable ``key: value`` / bullet lines."""
     pad = "  " * indent
-    lines: list[str] = []
     if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, (dict, list)):
-                lines.append(f"{pad}{key}:")
-                lines.extend(_text_lines(value, indent + 1))
-            else:
-                lines.append(f"{pad}{key}: {value}")
-    elif isinstance(data, list):
+        return _dict_lines(data, indent)
+    if isinstance(data, list):
         if not data:
-            lines.append(f"{pad}(none)")
+            return [f"{pad}(none)"]
+        lines: list[str] = []
         for item in data:
-            if isinstance(item, dict):
-                head = item.get("name") or item.get("id")
-                if head:
-                    lines.append(f"{pad}- {head}")
-                    rest = {k: v for k, v in item.items() if k != "name"}
-                    lines.extend(_text_lines(rest, indent + 1))
-                else:
-                    lines.extend(_text_lines(item, indent + 1))
-            else:
-                lines.append(f"{pad}- {item}")
-    else:
-        lines.append(f"{pad}{data}")
-    return lines
+            lines.extend(_item_lines(item, indent))
+        return lines
+    return [f"{pad}{data}"]
 
 
 def emit_payload(data: Any, *, json_mode: bool, empty: str = "(no data)") -> None:

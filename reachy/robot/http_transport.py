@@ -52,13 +52,16 @@ class HttpTransport(Transport):
                 raw = resp.read()
         except urllib.error.HTTPError as err:
             raise self._http_error(err) from err
-        except (urllib.error.URLError, OSError) as err:
+        except OSError as err:
+            # urllib.error.URLError is a subclass of OSError (so is a refused
+            # connection / DNS failure / timeout).
             raise self._unreachable(err) from err
         if not raw:
             return None
         try:
             return json.loads(raw)
-        except (ValueError, UnicodeDecodeError) as err:
+        except ValueError as err:
+            # json.JSONDecodeError / UnicodeDecodeError both subclass ValueError.
             raise CliError(
                 code=EXIT_ENV_ERROR,
                 message=f"daemon returned a non-JSON response from {path}",
@@ -86,7 +89,7 @@ class HttpTransport(Transport):
             code=EXIT_ENV_ERROR,
             message=f"cannot reach the Reachy daemon at {self.base_url} ({err})",
             remediation=(
-                "start it with 'reachy-mini-daemon', " "or set REACHY_BASE_URL / pass --base-url"
+                "start it with 'reachy-mini-daemon', or set REACHY_BASE_URL / pass --base-url"
             ),
         )
 

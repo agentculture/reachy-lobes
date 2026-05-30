@@ -144,6 +144,10 @@ Select with `--transport {http,sdk}` (or `REACHY_TRANSPORT`). If the daemon is
 unreachable, the command exits 2 with an `error:`/`hint:` pair — no traceback.
 """
 
+# Placeholder spliced into each robot-noun body so the shared transport block is
+# defined once (see ``_TRANSPORTS``).
+_TRANSPORTS_SLOT = "{transports}"
+
 _DEVICE = """\
 # reachy-mini-cli device
 
@@ -164,7 +168,7 @@ Device setup and status for the Reachy Mini.
     reachy-mini-cli device status
     reachy-mini-cli device state --json
     reachy-mini-cli device status --base-url http://reachy.local:8000
-""".replace("{transports}", _TRANSPORTS)
+""".replace(_TRANSPORTS_SLOT, _TRANSPORTS)
 
 _APP = """\
 # reachy-mini-cli app
@@ -187,7 +191,7 @@ Manage Reachy Mini apps (daemon-side; requires `--transport http`).
     reachy-mini-cli app list
     reachy-mini-cli app start my-app
     reachy-mini-cli app stop --json
-""".replace("{transports}", _TRANSPORTS)
+""".replace(_TRANSPORTS_SLOT, _TRANSPORTS)
 
 _MOVE = """\
 # reachy-mini-cli move
@@ -213,7 +217,7 @@ degrees for rotation — converted to the daemon's metres + radians.
     reachy-mini-cli move goto --antennas 30 -30 --duration 1
     reachy-mini-cli move wake
     reachy-mini-cli move sleep --json
-""".replace("{transports}", _TRANSPORTS)
+""".replace(_TRANSPORTS_SLOT, _TRANSPORTS)
 
 
 ENTRIES: dict[tuple[str, ...], str] = {

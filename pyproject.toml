@@ -18,6 +18,8 @@ dependencies = []
 # Optional "sdk" transport flavor. The default install stays dependency-free
 # (the http transport uses only the stdlib); installing the extra enables
 # `--transport sdk`, which drives the robot through the in-process client.
+# Sanctioned exception to the zero-runtime-dependency rule — see
+# docs/adr-0001-sdk-transport-extra.md.
 [project.optional-dependencies]
 sdk = ["reachy-mini>=1.0"]
 
