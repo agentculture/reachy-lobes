@@ -26,11 +26,13 @@ class HttpTransport(Transport):
     name = "http"
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = DEFAULT_TIMEOUT) -> None:
-        if not base_url.startswith(("http://", "https://")):
+        # Validate via the parsed scheme (not a literal prefix) so the daemon
+        # URL is constrained to http/https before it reaches urlopen.
+        if urllib.parse.urlsplit(base_url).scheme not in ("http", "https"):
             raise CliError(
                 code=EXIT_USER_ERROR,
-                message=f"base URL must start with http:// or https:// (got {base_url!r})",
-                remediation="pass --base-url http://host:port or set REACHY_BASE_URL",
+                message=f"base URL must use an http or https scheme (got {base_url!r})",
+                remediation="pass --base-url as an http(s) URL or set REACHY_BASE_URL",
             )
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout

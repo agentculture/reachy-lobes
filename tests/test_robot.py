@@ -201,7 +201,7 @@ def test_sdk_transport_daemon_op_unsupported(
 def test_bad_base_url_is_user_error(monkeypatch, capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["device", "status", "--base-url", "ftp://nope"])
     assert rc == 1
-    assert "http://" in capsys.readouterr().err
+    assert "http" in capsys.readouterr().err
 
 
 # --- overviews ------------------------------------------------------------
