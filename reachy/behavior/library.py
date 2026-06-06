@@ -13,11 +13,11 @@ is why the idle ``feel-alive`` layer here is a fresh continuous formulation rath
 than ``alive.next_pose``, which re-samples a random gaze target per call and is
 built for the slower, ``goto``-interpolated demo-mode loop.)
 
-The one exception is ``listen``: a *sensor-driven* entry (``wants_sense=True``)
-whose ``make_fn`` builds a fresh stateful closure per behavior — it reads the
-sound Direction of Arrival from ``sense`` and slews the head toward it, abstaining
-(returning ``None`` channels, so ``feel-alive`` shows through) when there is no
-sound to react to.
+The engine can still feed a *sensor-driven* entry (one with ``wants_sense=True``,
+built per-instance via ``make_fn`` so it may hold state) a live :class:`Sense`
+reading, but no built-in behavior currently uses it — sound-orienting moved to the
+dedicated, smoother ``reachy listen`` loop (:mod:`reachy.motion`), which drives the
+daemon's minjerk ``goto`` planner instead of streaming ``set_target``.
 
 Units are the CLI's friendly ones: millimetres, degrees, seconds.
 """
@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from reachy.behavior.model import Behavior, Contribution, Lifetime, StopClass, neutral_head
-from reachy.behavior.sense import Sense, doa_angle_to_yaw
+from reachy.behavior.sense import Sense
 from reachy.cli._errors import EXIT_USER_ERROR, CliError
 
 ContribFn = Callable[[float, dict, Sense], Contribution]
@@ -64,13 +64,6 @@ class LibraryEntry:
     fn: ContribFn | None = field(default=None, compare=False, repr=False)
     make_fn: Callable[[], ContribFn] | None = field(default=None, compare=False, repr=False)
     wants_sense: bool = False
-    # Most entries claim a fixed ``channels`` set; an entry whose claim depends on
-    # its params (e.g. ``listen`` claims ``body_yaw`` only when ``body_gain>0``)
-    # supplies ``channels_fn`` so a channel it will never drive does not make it an
-    # eviction target on that channel.
-    channels_fn: Callable[[dict], frozenset[str]] | None = field(
-        default=None, compare=False, repr=False
-    )
 
     def default_params(self) -> dict[str, float]:
         return {k: p.default for k, p in self.params.items()}
@@ -86,12 +79,6 @@ class LibraryEntry:
                 remediation="this is a library bug — report it",
             )
         return self.fn
-
-    def claimed_channels(self, params: dict[str, float]) -> frozenset[str]:
-        """The channels this instance claims (dynamic when ``channels_fn`` is set)."""
-        if self.channels_fn is not None:
-            return self.channels_fn(params)
-        return self.channels
 
 
 # --------------------------------------------------------------------------- #
@@ -179,48 +166,6 @@ def _body_turn_hold(t: float, p: dict, _sense: Sense) -> Contribution:
 def _clamp(value: float, limit: float) -> float:
     """Clamp ``value`` to the symmetric range ``[-limit, limit]``."""
     return max(-limit, min(limit, value))
-
-
-def _make_listen() -> ContribFn:
-    """Build a fresh sound-orienting closure: slew head (and optionally body) toward DoA.
-
-    Unlike the pure generators above this is *stateful* — it holds the current
-    head/body yaw and the last tick time so it can rate-limit (ease, not snap) the
-    slew toward the sound direction. When there is no usable reading — no mic,
-    daemon error, or (with ``speech_only``) no speech — it **abstains** by returning
-    ``None`` channels, so the passive ``feel-alive`` base layer keeps the head and
-    body alive rather than freezing them at the last orientation.
-    """
-    state = {"yaw_head": 0.0, "yaw_body": 0.0, "last_t": None}
-
-    def _listen(t: float, p: dict, sense: Sense) -> Contribution:
-        speech_only = p["speech_only"] >= 0.5
-        angle = sense.doa_angle
-        signal = angle is not None and (not speech_only or sense.speech_detected)
-        last = state["last_t"]
-        dt = 0.0 if last is None else max(0.0, t - last)
-        state["last_t"] = t
-        # Exponential ease. dt==0 (first active tick) -> alpha 0, so it eases up
-        # from where it is rather than snapping; smooth<=0 -> snap.
-        alpha = 1.0 - math.exp(-dt / p["smooth"]) if p["smooth"] > 0 else 1.0
-        if not signal:
-            # Nothing to orient to: abstain (return None channels) so feel-alive
-            # shows through. Ease the internal slew state back toward center so a
-            # re-acquired sound starts near where the head actually is, not from a
-            # stale target -> no jump on takeover.
-            state["yaw_head"] += (0.0 - state["yaw_head"]) * alpha
-            state["yaw_body"] += (0.0 - state["yaw_body"]) * alpha
-            return Contribution(head=None, body_yaw=None)
-        target_head = _clamp(doa_angle_to_yaw(angle, p["gain"]), p["max_yaw"])
-        state["yaw_head"] += (target_head - state["yaw_head"]) * alpha
-        body_yaw = None
-        if p["body_gain"] > 0:
-            target_body = _clamp(doa_angle_to_yaw(angle, p["body_gain"]), p["body_max"])
-            state["yaw_body"] += (target_body - state["yaw_body"]) * alpha
-            body_yaw = state["yaw_body"]
-        return Contribution(head=_head(yaw=state["yaw_head"]), body_yaw=body_yaw)
-
-    return _listen
 
 
 # --------------------------------------------------------------------------- #
@@ -348,29 +293,6 @@ LIBRARY: dict[str, LibraryEntry] = {
         },
         fn=_body_turn_hold,
     ),
-    "listen": LibraryEntry(
-        name="listen",
-        summary="turn the head/body toward the direction of arrival of sound (DoA)",
-        channels=frozenset({"head", "body_yaw"}),
-        default_class=StopClass.STOPPABLE,
-        looping=True,
-        default_duration=None,
-        params={
-            "gain": Param(0.6, "x", "head-yaw gain per acoustic angle"),
-            "max_yaw": Param(35.0, "deg", "max head yaw toward sound"),
-            "smooth": Param(0.35, "s", "slew ease time constant (smaller = snappier)"),
-            "speech_only": Param(0.0, "", "react only to speech (1) vs any sound (0)"),
-            "body_gain": Param(0.0, "x", "body-yaw gain per acoustic angle (0 = head only)"),
-            "body_max": Param(45.0, "deg", "max body yaw toward sound"),
-        },
-        make_fn=_make_listen,
-        wants_sense=True,
-        # Only contend for body_yaw when actually turning the body, so a head-only
-        # listen is not an eviction target for a body-yaw 'stopping' behavior.
-        channels_fn=lambda p: (
-            frozenset({"head", "body_yaw"}) if p["body_gain"] > 0 else frozenset({"head"})
-        ),
-    ),
 }
 
 
@@ -477,7 +399,7 @@ def build(
     return Behavior(
         id=behavior_id,
         name=name,
-        channels=entry.claimed_channels(params),
+        channels=entry.channels,
         stop_class=stop_class,
         lifetime=lifetime,
         params=dict(params),
