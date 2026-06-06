@@ -10,12 +10,14 @@ here we cover the CLI wiring and the process supervisor.)
 
 from __future__ import annotations
 
+import argparse
 import json
 import signal
 
 import pytest
 
-from reachy.cli import main
+from reachy.cli import _build_parser, main
+from reachy.cli._commands.listen import _add_tuning_args, _params_from_args
 from reachy.cli._errors import EXIT_ENV_ERROR, CliError
 from reachy.motion import supervisor
 from reachy.motion.listen import ListenParams
@@ -60,13 +62,22 @@ def test_run_centers_then_settles_when_silent(monkeypatch, capsys) -> None:
 
 
 def test_run_orients_toward_sound_json(monkeypatch, capsys) -> None:
-    tr = _FakeTransport(doa={"angle": 0.0, "speech_detected": False})  # sound on the left
+    # t6: the head turn (Tier-2) is triggered by SPEECH or a loud snap — a bare latched
+    # DoA angle never turns the head. So the live source here is a *speech* reading on the
+    # left; the producer leans (Tier-1) then orients toward it (Tier-2).
+    tr = _FakeTransport(doa={"angle": 0.0, "speech_detected": True})  # speech on the left
     monkeypatch.setattr("reachy.cli._commands.listen.get_transport", lambda args: tr)
-    rc = main(["listen", "run", "--json", "--dwell", "0", "--deadband", "0", "--max-ticks", "5"])
+    # Two-tier listen: a Tier-1 antenna lean precedes the Tier-2 head turn, and each
+    # move runs serially through the queue — so allow enough ticks for the head turn to
+    # *dispatch* after the lean's interpolation completes.
+    rc = main(["listen", "run", "--json", "--dwell", "0", "--deadband", "0", "--max-ticks", "20"])
     assert rc == 0
     events = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert any(e.get("action") for e in events)  # turned toward the sound
-    assert any((e.get("yaw") or 0.0) > 0 for e in events)  # left -> +yaw
+    assert any(e.get("action") for e in events)  # reacted to the sound
+    # t6 triggers the head turn immediately on speech (no dwell wait), so with deadband 0
+    # the off-axis speech orients the head (Tier-2: left -> +yaw). The Tier-1 antenna lean
+    # is exercised in tests/test_motion.py, where a within-deadband / no-trigger sound leans.
+    assert any((e.get("yaw") or 0.0) > 0 for e in events)  # Tier-2 turn: left -> +yaw
 
 
 def test_run_unreachable_exits_2(monkeypatch, capsys) -> None:
@@ -137,7 +148,8 @@ def test_start_preflights_and_spawns(monkeypatch, tmp_path, capsys) -> None:
 def test_start_refuses_when_daemon_unreachable(monkeypatch, capsys) -> None:
     monkeypatch.setattr("reachy.motion.supervisor.health_ok", lambda *a, **k: False)
     monkeypatch.setattr("subprocess.Popen", _no_spawn)
-    rc = main(["listen", "start"])
+    # Use --transport http explicitly: the health-check preflight is http-only.
+    rc = main(["listen", "start", "--transport", "http"])
     assert rc == 2
     err = capsys.readouterr().err
     assert err.startswith("error:")
@@ -252,3 +264,163 @@ def test_listen_overview_text(capsys) -> None:
 def test_bare_listen_prints_overview(capsys) -> None:
     assert main(["listen"]) == 0
     assert capsys.readouterr().out.strip()
+
+
+# --- SDK-first default transport -----------------------------------------
+
+
+def test_listen_run_defaults_to_sdk(monkeypatch) -> None:
+    """``reachy listen run`` with no --transport and no env → transport=sdk."""
+    monkeypatch.delenv("REACHY_TRANSPORT", raising=False)
+    parser = _build_parser()
+    args = parser.parse_args(["listen", "run"])
+    assert args.transport == "sdk"
+
+
+def test_listen_run_transport_flag_overrides(monkeypatch) -> None:
+    """``--transport http`` still selects http regardless of the SDK default."""
+    monkeypatch.delenv("REACHY_TRANSPORT", raising=False)
+    parser = _build_parser()
+    args = parser.parse_args(["listen", "run", "--transport", "http"])
+    assert args.transport == "http"
+
+
+def test_listen_run_env_overrides_sdk_default(monkeypatch) -> None:
+    """REACHY_TRANSPORT=http overrides the SDK default (env is respected)."""
+    monkeypatch.setenv("REACHY_TRANSPORT", "http")
+    # Re-import to pick up the env var that is read at registration time.
+    import importlib
+
+    import reachy.cli._commands.listen as _listen_mod
+
+    importlib.reload(_listen_mod)
+    import reachy.cli as _cli_mod
+
+    importlib.reload(_cli_mod)
+    from reachy.cli import _build_parser as _bp
+
+    parser = _bp()
+    args = parser.parse_args(["listen", "run"])
+    assert args.transport == "http"
+    # Reload back to sdk default for other tests.
+    monkeypatch.delenv("REACHY_TRANSPORT", raising=False)
+    importlib.reload(_listen_mod)
+    importlib.reload(_cli_mod)
+
+
+def test_listen_start_defaults_to_sdk(monkeypatch) -> None:
+    """``reachy listen start`` with no env → transport=sdk."""
+    monkeypatch.delenv("REACHY_TRANSPORT", raising=False)
+    parser = _build_parser()
+    args = parser.parse_args(["listen", "start"])
+    assert args.transport == "sdk"
+
+
+def test_listen_restart_defaults_to_sdk(monkeypatch) -> None:
+    """``reachy listen restart`` with no env → transport=sdk."""
+    monkeypatch.delenv("REACHY_TRANSPORT", raising=False)
+    parser = _build_parser()
+    args = parser.parse_args(["listen", "restart"])
+    assert args.transport == "sdk"
+
+
+# --- New tuning flags parse + thread into ListenParams -------------------
+
+
+def _parse_tuning(argv: list[str]) -> argparse.Namespace:
+    """Helper: build a minimal parser with just the tuning args and parse *argv*."""
+    p = argparse.ArgumentParser()
+    _add_tuning_args(p)
+    return p.parse_args(argv)
+
+
+def test_antenna_max_flag() -> None:
+    args = _parse_tuning(["--antenna-max", "25"])
+    params = _params_from_args(args)
+    assert params.antenna_max == 25.0
+
+
+def test_body_yaw_max_flag() -> None:
+    args = _parse_tuning(["--body-yaw-max", "60"])
+    params = _params_from_args(args)
+    assert params.body_yaw_max == 60.0
+
+
+def test_head_only_band_flag() -> None:
+    args = _parse_tuning(["--head-only-band", "20"])
+    params = _params_from_args(args)
+    assert params.head_only_band == 20.0
+
+
+def test_antenna_gain_flag() -> None:
+    args = _parse_tuning(["--antenna-gain", "0.5"])
+    params = _params_from_args(args)
+    assert params.antenna_gain == 0.5
+
+
+def test_body_speed_flag() -> None:
+    args = _parse_tuning(["--body-speed", "8"])
+    params = _params_from_args(args)
+    assert params.body_speed == 8.0
+
+
+def test_new_tuning_defaults_unchanged_when_unset() -> None:
+    """Unset new flags keep the ListenParams dataclass defaults."""
+    d = ListenParams()
+    args = _parse_tuning([])
+    params = _params_from_args(args)
+    assert params.antenna_gain == d.antenna_gain
+    assert params.antenna_max == d.antenna_max
+    assert params.body_yaw_max == d.body_yaw_max
+    assert params.body_speed == d.body_speed
+    assert params.head_only_band == d.head_only_band
+
+
+def test_combined_new_tuning_flags() -> None:
+    """All new flags together map to the right ListenParams fields."""
+    args = _parse_tuning(["--antenna-max", "25", "--body-yaw-max", "60", "--head-only-band", "20"])
+    params = _params_from_args(args)
+    assert params.antenna_max == 25.0
+    assert params.body_yaw_max == 60.0
+    assert params.head_only_band == 20.0
+
+
+def test_existing_flags_still_parse() -> None:
+    """Legacy flags (--gain, --max-yaw, --deadband, --dwell, --hold, --speed,
+    --recenter-after, --speech-only) continue to work alongside the new ones."""
+    args = _parse_tuning(
+        [
+            "--gain",
+            "0.8",
+            "--max-yaw",
+            "40",
+            "--deadband",
+            "10",
+            "--dwell",
+            "2",
+            "--hold",
+            "5",
+            "--speed",
+            "20",
+            "--recenter-after",
+            "6",
+            "--speech-only",
+        ]
+    )
+    params = _params_from_args(args)
+    assert params.gain == 0.8
+    assert params.max_yaw == 40.0
+    assert params.deadband == 10.0
+    assert params.dwell == 2.0
+    assert params.hold == 5.0
+    assert params.alert_speed == 20.0
+    assert params.relax_speed == 20.0
+    assert params.recenter_after == 6.0
+    assert params.speech_only is True
+
+
+def test_snap_ratio_and_floor_flags_parse() -> None:
+    """--snap-ratio and --snap-floor are accepted by the parser."""
+    args = _parse_tuning(["--snap-ratio", "7.0", "--snap-floor", "0.05"])
+    assert args.snap_ratio == 7.0
+    assert args.snap_floor == 0.05

@@ -23,6 +23,10 @@ bring one up with ``reachy daemon start``.
 from __future__ import annotations
 
 import argparse
+import os
+from typing import Callable
+
+import numpy as np
 
 from reachy.behavior.sense import DOA_TIMEOUT, DoaPoller, read_doa
 from reachy.cli._commands._robot import emit_payload
@@ -32,6 +36,7 @@ from reachy.cli._output import emit_diagnostic, emit_result
 from reachy.motion import supervisor
 from reachy.motion.listen import ListenParams, ListenProducer
 from reachy.motion.server import run as run_loop
+from reachy.motion.snap import SnapDetector
 from reachy.robot import add_robot_args, get_transport
 
 _JSON_HELP = "Emit structured JSON."
@@ -98,6 +103,56 @@ def _add_tuning_args(parser: argparse.ArgumentParser) -> None:
         dest="speech_only",
         help="react only to detected speech (default: any sound).",
     )
+    parser.add_argument(
+        "--antenna-gain",
+        type=float,
+        default=None,
+        dest="antenna_gain",
+        help=f"scales Tier-1 antenna lean magnitude (default {d.antenna_gain:g}).",
+    )
+    parser.add_argument(
+        "--antenna-max",
+        type=float,
+        default=None,
+        dest="antenna_max",
+        help=f"maximum near-side antenna deflection (deg, default {d.antenna_max:g}).",
+    )
+    parser.add_argument(
+        "--body-yaw-max",
+        type=float,
+        default=None,
+        dest="body_yaw_max",
+        help=f"max body yaw for Tier-2 head/body escalation (deg, default {d.body_yaw_max:g}).",
+    )
+    parser.add_argument(
+        "--body-speed",
+        type=float,
+        default=None,
+        dest="body_speed",
+        help=f"body turn slew speed for Tier-2 escalation (deg/s, default {d.body_speed:g}).",
+    )
+    parser.add_argument(
+        "--head-only-band",
+        type=float,
+        default=None,
+        dest="head_only_band",
+        help=f"|desired| <= this uses head-only; beyond triggers body escalation "
+        f"(deg, default {d.head_only_band:g}).",
+    )
+    parser.add_argument(
+        "--snap-ratio",
+        type=float,
+        default=None,
+        dest="snap_ratio",
+        help="RMS snap detector: loudness ratio over rolling average to fire (default 5.0).",
+    )
+    parser.add_argument(
+        "--snap-floor",
+        type=float,
+        default=None,
+        dest="snap_floor",
+        help="RMS snap detector: absolute RMS floor below which chunks are ignored (default 0.02).",
+    )
 
 
 def _params_from_args(args: argparse.Namespace) -> ListenParams:
@@ -119,6 +174,16 @@ def _params_from_args(args: argparse.Namespace) -> ListenParams:
         p.recenter_after = args.recenter_after
     if getattr(args, "speech_only", False):
         p.speech_only = True
+    if getattr(args, "antenna_gain", None) is not None:
+        p.antenna_gain = args.antenna_gain
+    if getattr(args, "antenna_max", None) is not None:
+        p.antenna_max = args.antenna_max
+    if getattr(args, "body_yaw_max", None) is not None:
+        p.body_yaw_max = args.body_yaw_max
+    if getattr(args, "body_speed", None) is not None:
+        p.body_speed = args.body_speed
+    if getattr(args, "head_only_band", None) is not None:
+        p.head_only_band = args.head_only_band
     return p
 
 
@@ -130,8 +195,15 @@ def cmd_listen_overview(args: argparse.Namespace) -> int:
         {
             "title": "What",
             "items": [
-                "A sound-reactive loop: turn the head toward a sustained, off-axis "
-                "sound (mic-array DoA), hold there, then ease back to center after silence.",
+                "A two-tier sound-reactive loop using real mic-array DoA + RMS loudness "
+                "(SDK-first by default).",
+                "Tier-1 (near-side antenna lean): on any live sound that does not trigger a "
+                "head turn, the antenna facing the source deflects gently toward it — "
+                "a subtle 'I hear you' cue.",
+                "Tier-2 (head→body 'turn to see'): on detected speech OR a loud RMS snap "
+                "transient, the head turns toward the source; when the angle exceeds "
+                "head-only-band the body rotates too (head re-centres on the residual) "
+                "so the whole robot faces the sound.",
                 "Smooth by construction — drives the daemon's minjerk 'goto' planner, "
                 "one move at a time through a serial motion queue (no jerky streaming).",
                 "Graceful: no mic / no daemon DoA ⇒ no reaction, no crash.",
@@ -149,8 +221,12 @@ def cmd_listen_overview(args: argparse.Namespace) -> int:
             "title": "Conventions",
             "items": [
                 "every command supports --json",
-                "tune the feel with --dwell / --hold / --speed / --deadband / --gain",
-                "needs a running daemon (reachy daemon start) for the http transport",
+                "SDK-first by default: real DoA + mic loudness in-process; "
+                "use --transport http for the remote/daemon profile",
+                "Tier-1 knobs: --antenna-gain / --antenna-max",
+                "Tier-2 knobs: --head-only-band / --body-yaw-max / --body-speed",
+                "feel knobs: --dwell / --hold / --speed / --deadband / --gain / --recenter-after",
+                "snap detector: --snap-ratio / --snap-floor (SDK profile only)",
                 "exit codes: 0 ok, 1 user error, 2 environment (daemon unreachable)",
             ],
         },
@@ -166,11 +242,56 @@ def cmd_listen_overview(args: argparse.Namespace) -> int:
 # --- run (foreground loop) ------------------------------------------------
 
 
+def _run_sdk_loop(
+    transport: object,
+    producer: ListenProducer,
+    args: argparse.Namespace,
+    on_action: Callable[[object], None],
+) -> int:
+    """Drive the loop over an open SDK media session (real DoA + mic-audio loudness)."""
+    snap_kwargs: dict[str, float] = {}
+    if getattr(args, "snap_ratio", None) is not None:
+        snap_kwargs["ratio"] = args.snap_ratio
+    if getattr(args, "snap_floor", None) is not None:
+        snap_kwargs["min_rms"] = args.snap_floor
+    with transport.media_session() as session:  # type: ignore[attr-defined]
+        poller = DoaPoller(read=lambda: read_doa(session, timeout=DOA_TIMEOUT))
+        detector = SnapDetector(**snap_kwargs)
+
+        def _audio(_t: float) -> tuple[bool, bool | None]:
+            sample = session.get_audio_sample()
+            if sample is None:
+                return (False, None)
+            rms = float(np.sqrt(np.mean(sample**2)))
+            return (detector.feed(sample), rms > detector.min_rms)
+
+        return run_loop(
+            transport,
+            producer,
+            sense=poller,
+            audio=_audio,
+            on_action=on_action,
+            max_ticks=args.max_ticks,
+        )
+
+
+def _run_http_loop(
+    transport: object,
+    producer: ListenProducer,
+    args: argparse.Namespace,
+    on_action: Callable[[object], None],
+) -> int:
+    """Drive the loop over the HTTP transport's DoA (no audio source / loudness)."""
+    poller = DoaPoller(read=lambda: read_doa(transport, timeout=DOA_TIMEOUT))
+    return run_loop(
+        transport, producer, sense=poller, on_action=on_action, max_ticks=args.max_ticks
+    )
+
+
 def cmd_listen_run(args: argparse.Namespace) -> int:
     json_mode = bool(getattr(args, "json", False))
     transport = get_transport(args)
     params = _params_from_args(args)
-    poller = DoaPoller(read=lambda: read_doa(transport, timeout=DOA_TIMEOUT))
     producer = ListenProducer(params)
 
     # Preflight: ease to center. Validates the transport (a dead daemon raises a
@@ -193,9 +314,12 @@ def cmd_listen_run(args: argparse.Namespace) -> int:
         else:
             emit_diagnostic(f"[listen] {action.label} ({action.duration:.1f}s)")
 
-    ticks = run_loop(
-        transport, producer, sense=poller, on_action=_on_action, max_ticks=args.max_ticks
-    )
+    # SDK profile streams real DoA + mic loudness through a media session; the HTTP/remote
+    # profile polls transport.doa() with no audio source.
+    if hasattr(transport, "media_session"):
+        ticks = _run_sdk_loop(transport, producer, args, _on_action)
+    else:
+        ticks = _run_http_loop(transport, producer, args, _on_action)
 
     # Settle: ease back to center (best effort — a dead daemon can't be settled).
     try:
@@ -251,6 +375,7 @@ def _no_verb(args: argparse.Namespace) -> int:
 def _register_run(noun_sub: argparse._SubParsersAction) -> None:
     run = noun_sub.add_parser("run", help="Run the sound-orienting loop in the foreground.")
     add_robot_args(run)
+    run.set_defaults(transport=os.environ.get("REACHY_TRANSPORT", "sdk"))
     _add_tuning_args(run)
     run.add_argument(
         "--max-ticks",
@@ -265,11 +390,13 @@ def _register_run(noun_sub: argparse._SubParsersAction) -> None:
 def _register_process_verbs(noun_sub: argparse._SubParsersAction) -> None:
     start = noun_sub.add_parser("start", help="Start the sound-orienting loop in the background.")
     add_robot_args(start)
+    start.set_defaults(transport=os.environ.get("REACHY_TRANSPORT", "sdk"))
     _add_tuning_args(start)
     start.set_defaults(func=cmd_listen_start)
 
     restart = noun_sub.add_parser("restart", help="Restart the background loop (re-reads tuning).")
     add_robot_args(restart)
+    restart.set_defaults(transport=os.environ.get("REACHY_TRANSPORT", "sdk"))
     _add_tuning_args(restart)
     restart.set_defaults(func=cmd_listen_restart)
 

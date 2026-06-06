@@ -5,7 +5,7 @@ Agent and CLI for operating the Reachy Mini expressive robot — device setup, a
 ## What you get
 
 - **An agent-first CLI** cited from [teken](https://github.com/agentculture/teken)
-  (`afi-cli`) — the runtime package has no third-party dependencies.
+  (`afi-cli`).
 - **A mesh identity** — `culture.yaml` (`suffix` + `backend`) and the matching
   prompt file (`CLAUDE.md` for `backend: claude`).
 - **The canonical guildmaster skill kit** (11 skills) under `.claude/skills/`,
@@ -16,8 +16,8 @@ Agent and CLI for operating the Reachy Mini expressive robot — device setup, a
 ## Quickstart
 
 ```bash
-uv sync --extra daemon                # default: + the local reachy-mini-daemon
-# uv sync                             # remote profile: HTTP-only, no daemon deps
+uv sync --extra daemon                # recommended — SDK + the reachy-mini-daemon binary
+uv sync                               # bare — numpy only; HTTP remote profile (--transport http)
 uv run pytest -n auto                 # run the test suite
 uv run reachy whoami                  # identity from culture.yaml
 uv run reachy learn                   # self-teaching prompt (add --json)
@@ -45,19 +45,20 @@ The `daemon`, `device`, `app`, and `move` noun groups operate the Reachy Mini.
 
 ### Install profiles
 
-The Reachy daemon (`reachy-mini-daemon`) and the in-process SDK ship in
-`reachy-mini`. Choose your install by where the daemon runs:
+`listen` is **SDK-first** — the `sdk` transport is its default, giving direct
+in-process access to the mic array (real DoA + RMS loudness via `reachy_mini`).
+`numpy` is a base dependency (the RMS detector; a pure wheel). `reachy-mini` itself
+stays an **extra**, not a base dep, because its transitive stack (pycairo /
+gstreamer / pyaudio) needs system libraries a bare box / CI lack — so the
+recommended install bundles it via an extra.
 
-- **Default — with the daemon:** `pip install 'reachy-cli[daemon]'`. Bundles
-  `reachy-mini`, so `reachy daemon start` can bring the daemon up locally. This
-  is the profile for a machine with a robot attached.
-- **Remote — without the daemon:** `pip install reachy-cli` (bare). The base
-  install keeps **zero runtime dependencies** (the `http` transport and the
-  `daemon status`/`stop` verbs use only the stdlib). Use it on a control box that
-  only talks to a daemon running elsewhere via `--base-url` / `REACHY_BASE_URL`.
-  `daemon start` here exits `2` with a hint to install the `[daemon]` extra.
-
-`[sdk]` (also `reachy-mini`) adds the in-process `--transport sdk` client.
+- **Recommended — with the SDK + daemon:** `pip install 'reachy-cli[daemon]'` (or
+  `[sdk]`). Pulls `reachy-mini`, so the `sdk` transport `listen` defaults to works
+  out of the box and `reachy daemon start` can bring the daemon up locally.
+- **Bare — HTTP remote profile:** `pip install reachy-cli` (no extra). `numpy`-only;
+  use `--transport http` (or `REACHY_TRANSPORT=http`) with `--base-url` /
+  `REACHY_BASE_URL` to talk to a daemon running elsewhere via its REST API. Running
+  the `sdk` transport here exits `2` with a hint to install the `[sdk]` extra.
 
 ### Bring the daemon up
 
@@ -77,16 +78,16 @@ under `$XDG_STATE_HOME/reachy` (`~/.local/state/reachy`).
 
 ### Transports
 
-The `device`, `app`, and `move` verbs talk to a running daemon through a
+The `device`, `app`, `move`, and `listen` verbs talk to the robot through a
 selectable **transport flavor**:
 
-- **`http`** (default) — the Reachy daemon's REST API. Uses only the Python
-  standard library, so the default install keeps **zero runtime dependencies**.
+- **`http`** — the Reachy daemon's REST API. Uses only the Python standard library.
   Point it at a daemon with `--base-url` or `REACHY_BASE_URL` (default
-  `http://localhost:8000`).
-- **`sdk`** — the in-process `reachy_mini` client. Install the optional extra:
-  `pip install 'reachy-cli[sdk]'`. Covers motion/state; daemon and app verbs
-  still require `http`.
+  `http://localhost:8000`). This is the default for `device`, `app`, and `move`.
+- **`sdk`** — the in-process `reachy_mini` client (included in the base install).
+  Covers motion/state and live audio streaming. **This is the default for `listen`**:
+  it streams mic audio directly in-process for real DoA + RMS loudness. Daemon and
+  app verbs still require `http`.
 
 Select per command with `--transport {http,sdk}` (or `REACHY_TRANSPORT`). Action
 verbs also accept `--timeout`. If no daemon is reachable, the command exits `2`
@@ -184,28 +185,38 @@ uv run reachy behavior stop all                # keeps the feel-alive base layer
 
 See `reachy explain behavior` for the full catalog, channels, and contention model.
 
-### Listen — orient the head toward sound
+### Listen — two-tier sound orienting (SDK-first)
 
-`listen` is **sound-reactive**: it reads the mic array's Direction of Arrival (DoA)
-from the daemon and turns the head toward a *sustained, off-axis* sound, holds there
-briefly, then eases back to center after silence. Unlike the behavior engine (which
-streams immediate `set_target` poses, jerky for big reorienting turns), it drives the
-daemon's smooth minjerk `goto` planner and runs one move at a time through a serial
-motion queue — so turns are soft and never conflict.
+`listen` is **SDK-first** and **two-tier**: it streams live mic audio from the
+`reachy_mini` SDK in-process (the `sdk` transport is the default), giving it real
+Direction of Arrival and real RMS loudness without polling the daemon.
+
+**Tier 1 — antenna lean:** On every tick, the antennas lean toward the live DoA
+(head holds). This gives the robot a subtle "perked ear" reaction to any live sound.
+
+**Tier 2 — head→body turn:** On detected *speech* or a loud RMS "snap" transient
+(a sudden noise spike detected by `SnapDetector`), the robot executes a smooth
+head→body turn. The head turns first; if the source is beyond `--head-only-band`
+degrees from center, the body rotates to face it and the head re-centers. A
+latched-DoA guard prevents stale angles from firing a spurious turn at rest.
+
+Both tiers drive the daemon's smooth minjerk `goto` planner through a serial motion
+queue, so turns are soft and never conflict. The HTTP transport is available via
+`--transport http` / `REACHY_TRANSPORT=http` for a control box connecting remotely.
 
 ```bash
-uv run reachy daemon start                     # something for the loop to drive
-uv run reachy listen run                        # foreground, any sound (Ctrl-C to stop)
-uv run reachy listen start                      # background, tracked process
+uv run reachy daemon start                          # bring the daemon up
+uv run reachy listen run                             # foreground, SDK transport (default)
+uv run reachy listen run --transport http            # foreground, HTTP transport
+uv run reachy listen start                           # background, tracked process
 uv run reachy listen status --json
-uv run reachy listen stop                       # eases back to center
+uv run reachy listen stop                            # eases back to center
 ```
 
-Tune the feel with `--dwell` (persist before turning), `--hold` (stay before
-reconsidering), `--speed` (deg/s), `--deadband`, and `--gain`; `--speech-only` reacts
-only to speech. It degrades gracefully: no mic / no daemon DoA ⇒ no reaction, no
-crash. Don't run it at the same time as `demo-mode` or the behavior engine — only one
-thing should drive the robot at a time. See `reachy explain listen` for details.
+Key tuning flags: `--gain`, `--deadband`, `--hold`, `--speed`, `--recenter-after`,
+`--speech-only` (Tier-2 speech only; Tier-1 still runs), `--antenna-max`,
+`--body-yaw-max`, `--head-only-band`, `--snap-ratio`, `--snap-floor`.
+See `reachy explain listen` for the full reference.
 
 ## Make it your own
 

@@ -104,20 +104,45 @@ you touch the CLI.
   is hand-built (no `--transport sdk` line) — `daemon` does NOT use a transport,
   so it does not call `_robot.noun_overview`/`get_transport`. A missing binary
   raises a clean exit-2 `CliError` pointing at the `[daemon]` install.
+  `is_robot_live()` (also in `reachy/daemon.py`) provides SDK-based daemon
+  liveness that stays correct across a daemon restart (fixes issue #21).
+- **`listen` noun — two-tier `ListenProducer` (SDK-first):** The `listen` loop is
+  implemented as a two-tier `ListenProducer`:
+  - *Tier 1 — antenna lean:* On every tick the antennas lean toward the current
+    DoA (head holds). Always active; gives a subtle "perked ear" reaction to live
+    sound.
+  - *Tier 2 — head→body turn:* Fires on detected speech or a loud RMS "snap"
+    transient. The head turns first; if the DoA is beyond `--head-only-band` the
+    body rotates to face the source and the head re-centers. A **latched-DoA guard**
+    prevents the daemon's frozen DoA angle (which stays at the last live angle at
+    rest) from firing a spurious turn — Tier 2 only fires on live speech/snap.
+  - `SnapDetector` (`reachy/motion/snap.py`) detects RMS spikes: an RMS value
+    above `snap_ratio × floor` triggers a snap. Algorithm cited from
+    `reachy_nova`'s `TrackingManager.detect_snap`.
+  - The `sdk` transport streams mic audio via `reachy_mini.ReachyMini().media` /
+    `media_session()` in-process — real DoA + real RMS per tick. This is listen's
+    default transport. The `http` transport polls the daemon's DoA endpoint instead;
+    use `--transport http` / `REACHY_TRANSPORT=http` for remote control-box
+    deployments.
+  - Both tiers drive the smooth minjerk `goto` planner one move at a time (serial
+    motion queue), so turns are soft and never conflict.
 
 ## Hard constraints
 
-- **Zero *base* runtime dependencies.** `pyproject.toml` keeps base
-  `dependencies = []` on purpose; `teken` is dev-only. This is why `whoami`
-  hand-rolls YAML parsing and `reachy/daemon.py` manages the daemon process with
-  stdlib `subprocess`/`urllib` only. The **recommended default install is `pip
-  install 'reachy-cli[daemon]'`** (pulls `reachy-mini` for the
-  `reachy-mini-daemon` binary); the bare `pip install reachy-cli` is the
-  HTTP-only *remote* profile. Keep the *base* dep-free — anything that needs
-  `reachy-mini` (the `sdk` transport, the daemon binary) goes behind the
-  `[daemon]`/`[sdk]` extras, never into base `dependencies`. Adding a base
-  runtime dep needs an explicit decision; it would break the dependency-free
-  remote profile the README sells.
+- **Base runtime dependencies — SDK-first, but installable.** `numpy` is the only
+  **base** runtime dependency (`pyproject.toml`) — it powers the RMS loudness
+  detector and is a pure wheel that installs everywhere. The SDK transport is
+  `listen`'s **default**, but `reachy-mini` stays an **extra** (`[sdk]` / `[daemon]`),
+  not a base dep, because its transitive stack (pycairo / gstreamer / pyaudio) needs
+  system libraries absent on a bare box and in CI — a hard base dep breaks `uv sync`
+  on the cairo build (learned the hard way on PR #24). So the **recommended default
+  install is `pip install 'reachy-cli[daemon]'`** (pulls `reachy-mini`); a bare
+  `pip install reachy-cli` is the HTTP remote profile, and running the `sdk`
+  transport without the extra raises a clean exit-2 `CliError` pointing at `[sdk]`.
+  The HTTP transport stays available via `--transport http` / `REACHY_TRANSPORT=http`.
+  Adding a *new* base runtime dep beyond `numpy` needs an explicit decision (keep the
+  base light enough for the remote profile). `teken` remains dev-only; `whoami` still
+  hand-rolls YAML; `reachy/daemon.py` still uses stdlib only.
 - **Python ≥ 3.12** (uses `X | None`, `tomllib`, etc.).
 - **Every PR bumps the version**, even docs/config/CI-only changes — the
   `version-check` CI job blocks the merge otherwise (it compares
