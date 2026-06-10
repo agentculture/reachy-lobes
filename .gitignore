@@ -224,7 +224,8 @@ __marimo__/
 # Per-machine skills config (copy from skills.local.yaml.example)
 skills.local.yaml
 
-# devague working state (not committed by default)
-.devague/questions/
+# devague working state (local only — never committed; specs/plans live in docs/)
+.devague/
 
-.devague/reviews/
+# colleague local tooling state (traces, stat dumps, skill mirrors) — never committed
+.colleague/
