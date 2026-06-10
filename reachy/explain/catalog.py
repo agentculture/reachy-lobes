@@ -603,6 +603,42 @@ assert this. Keep `say` as a pure TTS → playback pipe.
 """
 
 
+_THINK_DEMO = """\
+# reachy-mini-cli think demo
+
+Run a scripted `*emoji* "speech"` stream through the real expression + TTS
+pipeline, so a human can verify the body-expression wiring on a live robot
+without a running LLM.
+
+The built-in script is:
+
+    *🤔* "I wonder what that sound was."
+    *👂* "There it is again, to my left."
+    *🙂* "Ah — it's just the fan."
+
+Each `*emoji*` marker enqueues exactly one calm gesture via
+`ExpressionProducer`; each quoted phrase is synthesized via TTS and played
+through the robot speaker. The cognition-active signal is raised for the
+duration of the demo so a co-running `listen` backs off its idle motion.
+
+## Usage
+
+    reachy-mini-cli think demo                            # built-in script, sdk transport
+    reachy-mini-cli think demo --transport http           # use HTTP playback
+    reachy-mini-cli think demo --script '*😮* "Oh!"'     # custom script
+    reachy-mini-cli think demo --json                     # machine-readable result
+
+## Manual verification
+
+See `docs/verification/think-body-expression.md` for the full on-robot checklist.
+
+## Exit codes
+
+- `0` — demo ran to completion
+- `1` — user error (bad script / args)
+- `2` — environment error (TTS unreachable, missing SDK extra, etc.)
+"""
+
 _THINK = """\
 # reachy-mini-cli think
 
@@ -634,7 +670,25 @@ supervisor (`reachy/speech/supervisor.py`, distinct from `listen`'s).
   (re-reads flags and latest code).
 - `reachy-mini-cli think status` — the loop's process state (running / stopped
   / stale pid).
+- `reachy-mini-cli think expressions` — list the expression catalog (emoji +
+  pose descriptor); `expressions check` flags poses too similar to be distinct.
 - `reachy-mini-cli think overview` — this summary.
+
+## Expressions
+
+While thinking, the robot gestures: the LLM may emit `*emoji*` expression
+markers (and wraps spoken text in `"quotes"`). Each marker enqueues one calm
+gesture from the expression catalog onto a serial motion queue, drained one move
+at a time to the robot — `think` never streams `set_target` poses. The available
+emoji vocabulary is advertised to the LLM in its system prompt, pulled live from
+the catalog. Inspect the catalog with `think expressions` / `think expressions
+check`.
+
+## Cognition signal
+
+While `run` is active it publishes a file flag (`think_active.flag` under the
+state dir) so other subsystems (e.g. idle motion) can back off; the flag is
+cleared on every exit path, including Ctrl-C and errors.
 
 ## LLM endpoint
 
@@ -874,4 +928,9 @@ ENTRIES: dict[tuple[str, ...], str] = {
     ("think", "stop"): _THINK,
     ("think", "restart"): _THINK,
     ("think", "status"): _THINK,
+    ("think", "expressions"): _THINK,
+    ("think", "expressions", "overview"): _THINK,
+    ("think", "expressions", "list"): _THINK,
+    ("think", "expressions", "check"): _THINK,
+    ("think", "demo"): _THINK_DEMO,
 }
