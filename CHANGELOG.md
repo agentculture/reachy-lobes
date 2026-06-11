@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-06-11
+
+### Added
+
+- **`pat` noun — proprioceptive touch + snuggle.** Scratch Reachy Mini's
+  head (pitch press) or nudge it sideways (yaw press) and it leans/snuggles
+  into your hand — detected with NO touch sensor by comparing the commanded
+  head pose against the actual pose read back from the SDK
+  (`get_current_head_pose()`). Ported + improved from `reachy_nova`'s
+  `PatDetector`.
+- `reachy/motion/pat.py` — `PatDetector`: EMA-baselined commanded-vs-actual
+  deviation on pitch (scratch) and yaw (side-nudge), press/release hysteresis,
+  press-count window, level1/level2 state machine with cooldowns (pure numpy,
+  deterministic-testable via injected clock).
+- `reachy/motion/pat_reaction.py` — `PatReaction`: enqueues a
+  lean→nuzzle→settle gesture (a soft body-yaw lean toward the hand, antenna
+  affection, and a settling sigh) onto the shared serial `MotionQueue`.
+- Transport `head_pose()` readback (`reachy/robot/`): SDK reads the live 4×4
+  head pose, extracted to (pitch, yaw) degrees in pure numpy (no scipy);
+  http/base raise a clean exit-2.
+- `reachy-mini-cli pat` CLI noun — `run` (foreground loop), `demo` (no robot),
+  `overview`; `--json` everywhere; sdk-first with `--transport http` fallback.
+- A pat **breaks the idle stillness**: `reachy/motion/pat_signal.py` writes
+  `pat_active.flag`; the `listen` idle loop fully suppresses its wander for the
+  whole reaction (counterpart to `think`'s focused-idle `think_active.flag`).
+  The `run` loop routes all motion through the single serial executor and pauses
+  sensing while the lean plays, so the robot's own motion never self-triggers.
+
+### Changed
+
+- Reduced cognitive complexity of `PatDetector.update` and the `pat run` loop
+  (SonarCloud `S3776`): the detector's per-axis press tracking and two-level
+  state machine are split into `_track_pitch` / `_track_yaw` / `_advance_state`
+  helpers, and the run loop's sense→detect→react step into
+  `_sense_and_maybe_react`. Pure refactor — no behavior change.
+
 ## [0.14.0] - 2026-06-10
 
 ### Added
