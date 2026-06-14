@@ -28,7 +28,9 @@ collaborators — never a Python traceback.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
+import sys
 import threading
 import time
 from typing import Callable
@@ -38,8 +40,10 @@ import numpy as np
 from reachy.behavior.sense import DOA_TIMEOUT, DoaPoller, read_doa
 from reachy.cli._commands._robot import emit_payload
 from reachy.cli._commands.overview import emit_overview
-from reachy.cli._errors import CliError
+from reachy.cli._errors import EXIT_USER_ERROR, CliError
 from reachy.cli._output import emit_diagnostic, emit_result
+from reachy.export.blocks import Selection, parse_blocks
+from reachy.export.exporter import ExportHook, JsonlExporter
 from reachy.motion.expression import ExpressionProducer
 from reachy.motion.queue import MotionQueue
 from reachy.motion.server import run as run_motion
@@ -472,6 +476,50 @@ def _make_motion_executor(args: argparse.Namespace) -> _MotionExecutor:
     return _MotionExecutor(transport)
 
 
+def _build_export_hook(args: argparse.Namespace) -> ExportHook | None:
+    """Build the export sink from ``--export`` / ``--export-blocks``, or ``None``.
+
+    Returns ``None`` when ``--export`` is absent. Only ``-`` (stdout) is supported
+    in this version; any other target is a clean user error. ``--export-blocks``
+    selects which block types to emit (default: all three). The pose resolver
+    returns ``None`` for an emoji not in the catalog — the schema requires
+    ``pose: null`` for unknown emoji so consumers can detect them.
+    """
+    export_target = getattr(args, "export", None)
+    if export_target is None:
+        return None
+    if export_target != "-":
+        raise CliError(
+            code=EXIT_USER_ERROR,
+            message=f"unsupported export target: {export_target!r}",
+            remediation="only '-' (stdout) is supported in this version; "
+            "HTTP and file sinks are future work",
+        )
+    export_blocks_csv = getattr(args, "export_blocks", None)
+    selection = parse_blocks(export_blocks_csv) if export_blocks_csv else Selection.all()
+    exporter = JsonlExporter(sys.stdout, selection)
+    catalog = Catalog()
+
+    def _resolve_pose(emoji: str) -> dict | None:
+        return dataclasses.asdict(catalog.get(emoji)) if emoji in catalog else None
+
+    return ExportHook(emit=exporter.emit, pose_resolver=_resolve_pose)
+
+
+def _emit_run_summary(turns: int, *, exporting: bool, json_mode: bool) -> None:
+    """Emit the end-of-run summary, honoring stdout purity when exporting.
+
+    When exporting to stdout the summary must go to **stderr** so the JSONL feed
+    on stdout stays uncontaminated by non-event text — even under ``--json``.
+    """
+    if exporting:
+        emit_diagnostic(f"[think] stopped after {turns} spoken turn(s) (export: stdout)")
+    elif json_mode:
+        emit_result({"status": "ok", "turns": turns}, json_mode=True)
+    else:
+        emit_diagnostic(f"[think] stopped after {turns} spoken turn(s)")
+
+
 def cmd_think_run(args: argparse.Namespace) -> int:
     json_mode = bool(getattr(args, "json", False))
     buffer = EventBuffer(maxlen=_DEFAULT_MAXLEN)
@@ -500,12 +548,17 @@ def cmd_think_run(args: argparse.Namespace) -> int:
     _guarded_feed.close = getattr(feed, "close", None)  # type: ignore[attr-defined]
 
     system_prompt = _build_system_prompt(emojis=_expression_emojis())
+
+    # Export sink (None unless --export -); see _build_export_hook.
+    export_hook = _build_export_hook(args)
+
     engine = CognitionEngine(
         buffer=buffer,
         stream_sentences=_stream_sentences,
         synthesize=_synthesize,
         play_audio=_guarded_play,
         express=motion.express,
+        export=export_hook,
         system_prompt=system_prompt,
         llm_kwargs=_llm_kwargs(args),
         tts_kwargs=_tts_kwargs(args),
@@ -540,10 +593,7 @@ def cmd_think_run(args: argparse.Namespace) -> int:
             if close is not None:
                 close()
 
-    if json_mode:
-        emit_result({"status": "ok", "turns": turns}, json_mode=True)
-    else:
-        emit_diagnostic(f"[think] stopped after {turns} spoken turn(s)")
+    _emit_run_summary(turns, exporting=export_hook is not None, json_mode=json_mode)
     return 0
 
 
@@ -794,6 +844,23 @@ def _register_run(noun_sub: argparse._SubParsersAction) -> None:
         default=None,
         dest="max_ticks",
         help="Stop after this many loop iterations (idle turns included).",
+    )
+    run.add_argument(
+        "--export",
+        default=None,
+        dest="export",
+        metavar="TARGET",
+        help="Export events as JSONL to TARGET.  Only '-' (stdout) is supported in this "
+        "version.  When set, stdout carries a pure JSONL event feed and the run summary "
+        "is redirected to stderr.",
+    )
+    run.add_argument(
+        "--export-blocks",
+        default=None,
+        dest="export_blocks",
+        metavar="BLOCKS",
+        help="Comma-separated list of block types to include in the export feed "
+        "(valid: thinking, message, emotion).  Default: all three when --export is set.",
     )
     run.set_defaults(func=cmd_think_run)
 

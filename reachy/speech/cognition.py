@@ -56,9 +56,12 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from collections.abc import Iterator
 from typing import Callable, Protocol
 
+from reachy.export.events import EmotionEvent, MessageEvent, ThinkingEvent
+from reachy.export.exporter import ExportHook
 from reachy.speech import llm as _llm
 from reachy.speech import playback as _playback
 from reachy.speech import tts as _tts
@@ -158,6 +161,22 @@ class CognitionEngine:
         one calm gesture on the serial motion queue. The engine deliberately does
         **not** import :mod:`reachy.motion` — the producer is injected through this
         callback, preserving the say/think and speech/motion boundaries.
+    export:
+        Optional :class:`~reachy.export.exporter.ExportHook` — the **export hook**,
+        bundling ``emit`` (the sink, e.g. ``JsonlExporter.emit``, which never
+        raises), ``pose_resolver`` (emoji → 9-axis pose dict, or ``None`` for an
+        unknown emoji; fills :attr:`EmotionEvent.pose`), and ``time_fn`` (the
+        wall-clock source used to stamp each event's ``ts`` — tests inject a
+        constant for determinism). When given, each turn emits export blocks as it
+        runs: one :class:`~reachy.export.events.EmotionEvent` per expression marker,
+        one :class:`~reachy.export.events.MessageEvent` per quoted speech span (both
+        interleaved in stream order, alongside the existing speech/motion side
+        effects), and exactly one :class:`~reachy.export.events.ThinkingEvent` at
+        the end of the turn carrying the snapshot's sense cues and the **raw**
+        concatenated LLM text for the turn (see the raw-thought tap below). Defaults
+        to ``None`` — when absent the engine's output, control flow, and timing are
+        *byte-identical* to a build without this hook: no events are built and the
+        export branch is never entered.
     system_prompt:
         The system message prepended to every turn's prompt.
     llm_kwargs / tts_kwargs / playback_kwargs:
@@ -171,6 +190,18 @@ class CognitionEngine:
 
     All collaborators are injectable so tests can substitute deterministic fakes;
     each defaults to the real Wave-1 module function.
+
+    Raw-thought tap
+    ---------------
+    When ``export`` is set the engine accumulates the **raw** LLM text for the turn
+    — every chunk pulled off the stream, *before* the
+    :class:`~reachy.speech.markers.MarkerParser` discards prose outside ``*…*`` /
+    ``"…"`` spans. The tap sits at the point chunks are fed to the parser
+    (:meth:`_stream_and_speak`), so the resulting :class:`ThinkingEvent.text` is the
+    full concatenation (including un-spoken prose, the literal ``*emoji*`` markers,
+    the quote delimiters, and any unclosed span dropped at flush) — not merely the
+    spoken text. The tap is a pure side observation; it never alters what is fed to
+    the parser, so speech behaviour is unchanged.
     """
 
     def __init__(
@@ -181,6 +212,7 @@ class CognitionEngine:
         synthesize: _Synthesize | None = None,
         play_audio: _PlayAudio | None = None,
         express: _Express | None = None,
+        export: ExportHook | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         llm_kwargs: dict | None = None,
         tts_kwargs: dict | None = None,
@@ -195,15 +227,15 @@ class CognitionEngine:
         # Optional motion seam: fired once per expression marker, in stream order.
         # None → a no-op (markers parsed out of the speech, emoji simply not driven).
         self._express = express
+        # Optional export hook (bundles emit + pose_resolver + time_fn). None →
+        # the export path is never entered, so behaviour is byte-identical to a
+        # build without the hook.
+        self._export = export
         self._system_prompt = system_prompt
         self._llm_kwargs = dict(llm_kwargs or {})
         self._tts_kwargs = dict(tts_kwargs or {})
         self._playback_kwargs = dict(playback_kwargs or {})
-        if sleep is None:
-            import time
-
-            sleep = time.sleep
-        self._sleep = sleep
+        self._sleep = sleep if sleep is not None else time.sleep
         self._turn_interval = turn_interval
 
         # The cognition lock guarantees exactly one turn runs at a time: a
@@ -242,10 +274,10 @@ class CognitionEngine:
             if not cues:
                 return False
             messages = build_messages(self._system_prompt, cues)
-            self._stream_and_speak(messages)
+            self._stream_and_speak(messages, cues)
             return True
 
-    def _stream_and_speak(self, messages: list[dict]) -> None:
+    def _stream_and_speak(self, messages: list[dict], cues: list[SenseCue]) -> None:
         """Producer/consumer pipeline: parse markers, speak quoted text, drive expressions.
 
         The main thread is the *producer*: it pulls chunks off the LLM stream,
@@ -266,6 +298,20 @@ class CognitionEngine:
         plain-sentence fakes in the older tests) is spoken verbatim — see
         :func:`_iter_work_items`.
 
+        Export hook (only when :attr:`_export` is set)
+        ----------------------------------------------
+        ``cues`` is the turn's buffer snapshot; it is used only to build the
+        turn-end :class:`ThinkingEvent`. The producer's chunk source is wrapped by
+        :func:`_tap_raw` so the **raw** LLM text is accumulated *before* the parser
+        discards out-of-span prose — that accumulation becomes ``ThinkingEvent.text``.
+        As each work item is produced (in stream order, on this producer thread) the
+        corresponding :class:`EmotionEvent` / :class:`MessageEvent` is exported, so
+        emotion/message ordering follows the stream exactly and never depends on the
+        worker's playback timing. The :class:`ThinkingEvent` is exported once, after
+        the producer loop drains. Exports are pure side observations — they do not
+        touch the work queue, so speech behaviour, ordering, and the think↔speak
+        overlap are unchanged. When :attr:`_export` is ``None`` none of this runs.
+
         Any exception from the worker (synth/playback ``CliError``) is captured and
         re-raised on this thread after the worker is joined, so it propagates out of
         :meth:`run_turn` under the error contract.
@@ -279,10 +325,16 @@ class CognitionEngine:
             daemon=True,
         )
         worker.start()
+        # Raw-thought accumulator: filled by _tap_raw only when exporting.
+        raw_parts: list[str] = []
         try:
             chunks = self._stream_sentences(messages, **self._llm_kwargs)
+            if self._export is not None:
+                chunks = _tap_raw(chunks, raw_parts)
             for item in _iter_work_items(chunks):
                 speak_q.put(item)
+                if self._export is not None:
+                    self._emit_for_item(item)
         finally:
             # Always signal end-of-stream and join, so the worker terminates even
             # if the producer raised (e.g. LLM CliError mid-stream).
@@ -290,6 +342,31 @@ class CognitionEngine:
             worker.join()
         if worker_error:
             raise worker_error[0]
+        # Turn-end thinking block: the full raw stream + this turn's sense cues.
+        if self._export is not None:
+            self._export.emit(
+                ThinkingEvent(
+                    cues=[cue.text for cue in cues],
+                    text="".join(raw_parts),
+                    ts=self._export.time_fn(),
+                )
+            )
+
+    def _emit_for_item(self, item: tuple[str, str]) -> None:
+        """Export the block for one work item, in producer (stream) order.
+
+        ``("express", emoji)`` → :class:`EmotionEvent` (pose via the hook's
+        ``pose_resolver`` when set); ``("speak", text)`` → :class:`MessageEvent`.
+        Only called when :attr:`_export` is set; the hook's ``emit`` is the
+        caller's sink (the real :class:`JsonlExporter.emit` never raises).
+        """
+        hook = self._export  # never None: only called from the guarded export branch
+        kind, payload = item
+        if kind == "express":
+            pose = hook.pose_resolver(payload) if hook.pose_resolver is not None else None
+            hook.emit(EmotionEvent(emoji=payload, pose=pose, ts=hook.time_fn()))
+        else:  # "speak"
+            hook.emit(MessageEvent(text=payload, ts=hook.time_fn()))
 
     def _speak_worker(self, speak_q: queue.Queue, error_out: list) -> None:
         """Drain the work queue in order: speak quoted text, fire expressions.
@@ -379,6 +456,22 @@ class CognitionEngine:
                 # controls termination.)
                 break
         return spoken
+
+
+def _tap_raw(chunks: Iterator[str], sink: list[str]) -> Iterator[str]:
+    """Pass-through generator that appends each raw chunk to ``sink`` before yielding.
+
+    This is the **raw-thought tap**: it sits between the LLM stream and the
+    :class:`~reachy.speech.markers.MarkerParser` so the full, un-discarded stream is
+    captured for the turn's :class:`ThinkingEvent`. It yields each chunk *verbatim*
+    (including empty chunks) so the parser sees an identical stream to the un-tapped
+    case — the tap never alters what is parsed or spoken. ``sink`` accumulates the
+    chunk strings; ``"".join(sink)`` is the byte-exact raw turn text once the stream
+    is exhausted.
+    """
+    for chunk in chunks:
+        sink.append(chunk)
+        yield chunk
 
 
 def _event_to_item(event) -> tuple[str, str]:
