@@ -23,25 +23,34 @@ bring one up with ``reachy daemon start``.
 from __future__ import annotations
 
 import argparse
+import logging
+import math
 import os
 from typing import Callable
 
 import numpy as np
 
-from reachy.behavior.sense import DOA_TIMEOUT, DoaPoller, read_doa
+from reachy.behavior.sense import DOA_TIMEOUT, DoaPoller, Sense, read_doa
 from reachy.cli._commands._robot import emit_payload
 from reachy.cli._commands.overview import emit_overview
 from reachy.cli._errors import CliError
 from reachy.cli._output import emit_diagnostic, emit_result
 from reachy.motion import supervisor
-from reachy.motion.listen import ListenParams, ListenProducer
+from reachy.motion.listen import ListenParams, ListenProducer, SampleHolder
+from reachy.motion.listen_hooks import HookChain
 from reachy.motion.listen_pat import PatHook
+from reachy.motion.listen_sleep import SleepHook
+from reachy.motion.listen_think import ThinkHook
+from reachy.motion.listen_vision import VisionHook
 from reachy.motion.pat import PatDetector
 from reachy.motion.queue import MotionQueue
+from reachy.motion.sense_sample import SenseSample
 from reachy.motion.server import LoopHooks
 from reachy.motion.server import run as run_loop
 from reachy.motion.snap import SnapDetector
 from reachy.robot import add_robot_args, get_transport
+
+logger = logging.getLogger(__name__)
 
 _JSON_HELP = "Emit structured JSON."
 _CENTER = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
@@ -212,6 +221,27 @@ def _add_pat_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_live_arg(parser: argparse.ArgumentParser) -> None:
+    """The ``--live`` opt-in: fold ALL the senses into the one listen loop.
+
+    Off by default — bare ``listen run`` is exactly as today (sound-orient + the
+    single head-pat hook). With ``--live`` the loop additionally composes the
+    ``think`` cognition trigger, ``vision`` motion/light detection, and the
+    ``sleep`` decay→wake state machine — all four sense hooks ride the ONE SDK
+    media session and the ONE motion queue, arbitrated by the idle-interrupt
+    priority ``sleep > pat > think``. This is the "live mode" the boot service
+    runs. SDK transport only (the http profile has no audio/camera/pose).
+    """
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        dest="live",
+        default=False,
+        help="fold think + vision + sleep into the loop alongside sound-orient + pat "
+        "(sdk only; the mode the boot service runs).",
+    )
+
+
 # 1:1 ``(arg attr, ListenParams attr)`` flags: an unset CLI flag (``None``) keeps
 # the param's default. The genuinely special cases (--speed sets two fields,
 # --speech-only is a bool flag, --pat is a default-True toggle) are handled apart.
@@ -341,6 +371,143 @@ def _build_pat_hook(args: argparse.Namespace, transport: object, queue) -> PatHo
     return PatHook(queue, detector=detector)
 
 
+def _build_think_hook(provider: Callable[[], SenseSample | None]) -> ThinkHook | None:
+    """A :class:`ThinkHook` driving cognition from the shared sample, or ``None``.
+
+    Builds a real :class:`~reachy.speech.cognition.CognitionEngine` over a shared
+    :class:`~reachy.speech.events.EventBuffer` and wires that *same* buffer into the
+    hook (the engine stores its buffer privately and does not expose it, so the
+    composition layer must pass it explicitly — see ``listen_think.ThinkHook``).
+    Construction is wrapped: if the cognition stack can't be assembled (e.g. the LLM
+    env isn't configured), we log once and return ``None`` so ``--live`` still runs
+    the other three senses — the loop must never die because cognition is absent.
+    """
+    try:
+        # Imported lazily so a bare (no-LLM) live run, or a box without the speech
+        # deps configured, doesn't pull the cognition stack at module import time.
+        from reachy.speech.cognition import CognitionEngine
+        from reachy.speech.events import EventBuffer
+
+        buffer = EventBuffer()
+        engine = CognitionEngine(buffer=buffer)
+        return ThinkHook(provider, engine=engine, buffer=buffer)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "listen --live: cognition engine unavailable; think fold-in disabled", exc_info=True
+        )
+        return None
+
+
+class _SessionBoundTransport:
+    """Route the loop's per-tick pose / move / frame reads through the ONE open
+    media session instead of opening a fresh ``ReachyMini`` per call.
+
+    ``SdkTransport.head_pose`` / ``move_goto`` / ``get_frame`` each open a new SDK
+    client per call, and the SDK's ``GStreamerAudio`` teardown leaks file
+    descriptors — so at the loop's tick/move/frame rate they exhaust the process
+    fd limit in minutes and crash-loop the service (issue #51). The loop already
+    holds one open client via ``media_session()``; this proxy serves those three
+    reads from it and delegates everything else to the base transport untouched.
+    """
+
+    def __init__(self, base: object, session: object) -> None:
+        self._base = base
+        self._session = session
+
+    def _via(self, name: str):  # type: ignore[no-untyped-def]
+        """Prefer the open session for *name*; fall back to the base transport.
+
+        The production :class:`~reachy.robot.sdk_transport.MediaSession` serves
+        all of ``head_pose``/``move_goto``/``get_frame``, so the real loop always
+        rides the one open client (the issue-#51 fix). The fallback only matters
+        for the HTTP profile / minimal fakes whose session does not expose them.
+        """
+        fn = getattr(self._session, name, None)
+        return fn if callable(fn) else getattr(self._base, name)
+
+    def head_pose(self) -> tuple[float, float]:
+        return self._via("head_pose")()
+
+    def move_goto(self, **kwargs: object) -> object:
+        return self._via("move_goto")(**kwargs)
+
+    def get_frame(self) -> object:
+        return self._via("get_frame")()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._base, name)
+
+
+def _build_live_hooks(
+    transport: object,
+    queue: MotionQueue,
+    provider: Callable[[], SenseSample | None],
+    pat_hook: PatHook | None,
+) -> list[object]:
+    """Build the ``--live`` sense hooks in ``sleep > pat > think`` priority order.
+
+    The flag-arbitrated three lead in descending idle-interrupt priority (sleep
+    yields the head entirely, pat pauses the idle wander, think drops to a focused
+    breathe), then vision rides last (it competes for nothing the flags arbitrate).
+    All four share the loop's one ``queue`` and the one shared-sample ``provider``;
+    none opens its own audio/camera/pose — they ride the single SDK client the loop
+    owns. A hook whose optional stack is unavailable is simply omitted. The list is
+    handed to a :class:`~reachy.motion.listen_hooks.HookChain` as the loop's single
+    ``on_tick``.
+    """
+    sleep_hook = SleepHook(provider)
+    think_hook = _build_think_hook(provider)
+    vision_hook = VisionHook(queue=queue, transport=transport)
+    ordered: list[object] = [sleep_hook]
+    if pat_hook is not None:
+        ordered.append(pat_hook)
+    if think_hook is not None:
+        ordered.append(think_hook)
+    ordered.append(vision_hook)
+    return ordered
+
+
+def _build_sample_tap(
+    holder: SampleHolder,
+    poller: DoaPoller,
+    audio: Callable[[float], tuple[bool, bool | None]],
+    audio_rms: dict[str, float],
+) -> tuple[Callable[[float], Sense], Callable[[float], tuple[bool, bool | None]]]:
+    """Wrap the loop's sense/audio taps so each tick publishes a shared SenseSample.
+
+    The loop reads ONE mic chunk per tick — inside ``audio(t)`` (the loop's
+    ``_audio``), which computes snap/sound_present AND stashes that chunk's loudness
+    into ``audio_rms``. We reuse that exact value here rather than re-reading the
+    session (a second ``get_audio_sample()`` would consume a *different* chunk,
+    desyncing the stored RMS from the snap decision and dropping half the audio).
+    ``server.run`` calls ``audio(t)`` then ``sense(t)`` each tick, so the audio
+    wrapper records this tick's snap and the sense wrapper (running second)
+    assembles the full :class:`SenseSample` from the same chunk and publishes it.
+    """
+    last: dict[str, bool | None] = {"snap": False, "sound_present": None}
+
+    def _audio_tap(t: float) -> tuple[bool, bool | None]:
+        snap, sound_present = audio(t)  # reads the chunk ONCE; stashes rms in audio_rms
+        last["snap"] = bool(snap)
+        last["sound_present"] = sound_present
+        return snap, sound_present
+
+    def _sense_tap(t: float) -> Sense:
+        sense = poller(t)
+        doa_deg = None if sense.doa_angle is None else math.degrees(sense.doa_angle)
+        holder.update(
+            SenseSample(
+                rms=float(audio_rms["rms"]),
+                doa=doa_deg,
+                speech=bool(sense.speech_detected) or bool(last["snap"]),
+                ts=t,
+            )
+        )
+        return sense
+
+    return _sense_tap, _audio_tap
+
+
 def _run_sdk_loop(
     transport: object,
     producer: ListenProducer,
@@ -349,12 +516,18 @@ def _run_sdk_loop(
 ) -> int:
     """Drive the loop over an open SDK media session (real DoA + mic-audio loudness).
 
-    The loop also folds in proprioceptive head-pat detection (unless ``--no-pat``):
-    a :class:`~reachy.motion.listen_pat.PatHook` runs once per tick via the
-    executor's ``on_tick`` seam, reading the head pose back through the *same* SDK
-    client the loop owns. On a detected pat it enqueues a lean→nuzzle→settle
-    gesture onto the loop's queue and raises the ``pat_active`` flag (so the idle
-    wander yields) — so ``listen`` reacts to both sound and touch at once.
+    The loop folds in proprioceptive head-pat detection (unless ``--no-pat``): a
+    :class:`~reachy.motion.listen_pat.PatHook` runs once per tick via the executor's
+    ``on_tick`` seam, reading the head pose back through the *same* SDK client the
+    loop owns. On a detected pat it enqueues a lean→nuzzle→settle gesture and raises
+    the ``pat_active`` flag (so the idle wander yields).
+
+    Under ``--live`` it composes ALL four sense hooks into ONE
+    :class:`~reachy.motion.listen_hooks.HookChain` (the loop's single ``on_tick``):
+    ``sleep > pat > think`` by idle-interrupt priority, plus vision. The loop opens
+    ONE media session and every hook rides it via the shared-sample provider — no
+    hook opens a second single-consumer session (see the single-SDK-owner model in
+    ``CLAUDE.md``).
     """
     snap_kwargs: dict[str, float] = {}
     if getattr(args, "snap_ratio", None) is not None:
@@ -363,28 +536,51 @@ def _run_sdk_loop(
         snap_kwargs["min_rms"] = args.snap_floor
     queue = MotionQueue()
     pat_hook = _build_pat_hook(args, transport, queue)
+    holder = SampleHolder()
     with transport.media_session() as session:  # type: ignore[attr-defined]
+        # Per-tick pose / move / frame reads ride the ONE open client (issue #51).
+        loop_transport = _SessionBoundTransport(transport, session)
         poller = DoaPoller(read=lambda: read_doa(session, timeout=DOA_TIMEOUT))
         detector = SnapDetector(**snap_kwargs)
+        # The ONE mic chunk read per tick; _audio stashes its loudness here so the
+        # --live sample tap reuses it instead of reading a second (different) chunk.
+        audio_rms: dict[str, float] = {"rms": 0.0}
 
         def _audio(_t: float) -> tuple[bool, bool | None]:
             sample = session.get_audio_sample()
             if sample is None:
+                audio_rms["rms"] = 0.0
                 return (False, None)
             rms = float(np.sqrt(np.mean(sample**2)))
+            audio_rms["rms"] = rms
             return (detector.feed(sample), rms > detector.min_rms)
+
+        # --live composes all four sense hooks into one HookChain *and* taps the
+        # loop's per-tick reading into the shared-sample holder the audio hooks read.
+        # The default keeps the established single-PatHook on_tick and the bare
+        # sense/audio taps byte-for-byte (no chain, no holder tap, no extra read).
+        if getattr(args, "live", False):
+            sense_tap, audio_tap = _build_sample_tap(holder, poller, _audio, audio_rms)
+            hooks_list = _build_live_hooks(loop_transport, queue, holder.provider, pat_hook)
+            on_tick: object = HookChain(hooks_list)
+        else:
+            sense_tap, audio_tap = poller, _audio
+            on_tick = pat_hook
 
         try:
             return run_loop(
-                transport,
+                loop_transport,
                 producer,
-                hooks=LoopHooks(sense=poller, audio=_audio, on_action=on_action, on_tick=pat_hook),
+                hooks=LoopHooks(
+                    sense=sense_tap, audio=audio_tap, on_action=on_action, on_tick=on_tick
+                ),
                 queue=queue,
                 max_ticks=args.max_ticks,
             )
         finally:
-            if pat_hook is not None:
-                pat_hook.close()
+            close = getattr(on_tick, "close", None)
+            if close is not None:
+                close()
 
 
 def _run_http_loop(
@@ -493,6 +689,7 @@ def _register_run(noun_sub: argparse._SubParsersAction) -> None:
     run.set_defaults(transport=os.environ.get("REACHY_TRANSPORT", "sdk"))
     _add_tuning_args(run)
     _add_pat_args(run)
+    _add_live_arg(run)
     run.add_argument(
         "--max-ticks",
         type=int,
