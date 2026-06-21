@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-06-21
+
+### Added
+
+- listen --live --transcribe transcribes whole utterances (endpointing on a pause) instead of 1.5s rolling-window fragments, so cognition hears full sentences
+- Engagement gate: --live --transcribe responds only to clear sentences addressed by name (reachy/robot) or continuing an ongoing conversation; ambient noise and short fragments are ignored
+- Transcript cues now carry the speaker direction — heard someone say (from the left): ...
+- reachy.speech.stt.Transcriber.transcribe_once() — single-POST full-utterance transcription
+
+### Changed
+
+- TTS client retargeted from Magpie to model-gear Chatterbox: JSON {text,voice} body, voice:null default, 24 kHz
+- listen --live cognition speech plays through the daemon (HTTP) instead of opening a second ReachyMini client (single-SDK-owner)
+- listen --live --transcribe drives cognition from transcribed WORDS only (raw DoA/loudness cues no longer feed cognition) and suppresses the Tier-2 head/body auto-turn (antenna lean still reacts to sound)
+
+### Fixed
+
+- SDK speaker playback resamples PCM to the device output rate (16 kHz) — TTS no longer plays slow/low-pitched (latent bug for any non-16kHz TTS)
+- Self-feedback loop: the robot no longer reacts to its own TTS as loud sound and chatters
+- Self-mute window now covers the full spoken-clip duration so the robot never transcribes its own (long) voice
+
+## [0.26.0] - 2026-06-21
+
+### Added
+
+- `listen run --live --transcribe`: optional STT transcribes nearby speech (model-gear / Parakeet at `REACHY_STT_URL`) and feeds the recognised WORDS into live cognition, so the robot reasons about what was said, not just that a sound came from a direction. Off by default; requires `--live` + the `sdk` transport. A self-mute window stops the robot transcribing its own voice; an unreachable STT degrades to no-words and never stalls the loop. Not a dialogue/turn-taking assistant.
+- `reachy/speech/stt.py` shared `Transcriber` — the Parakeet `/v1/audio/transcriptions` WAV-multipart leg (stdlib urllib + numpy), returning transcript text.
+- `SenseSample.audio` optional raw per-tick mic chunk; `EventBuffer.feed_transcript` transcript cue; `reachy/motion/listen_transcribe.py` `TranscribeHook` (rides the shared sample, opens no second media session).
+
+### Changed
+
+- `sleep` wake-word `HttpSttBackend` now delegates transcription to the shared `Transcriber` (one STT client, no duplicated WAV/multipart/urllib stack).
+- the systemd `live` boot unit runs `listen run --live --transcribe`, so the on-robot presence hears words by default (CLI default stays off).
+
 ## [0.25.0] - 2026-06-21
 
 ### Added
