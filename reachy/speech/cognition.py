@@ -38,11 +38,20 @@ to a single method is what makes the serialized-cognition guarantee meaningful.
 
 Errors
 ------
-A :class:`~reachy.cli._errors.CliError` raised by the LLM or TTS clients (e.g. an
+A :class:`~reachy.cli._errors.CliError` raised by the LLM client (e.g. an
 unreachable endpoint) is **not** swallowed — it propagates out of
 :meth:`run_turn` (and :meth:`run`) so the CLI's top-level handler renders it under
-the structured error contract. The speak worker re-raises any such error on the
-turn thread once the stream finishes.
+the structured error contract.
+
+TTS / playback errors follow the LLM rule **by default** (``audio_optional=False``):
+the speak worker re-raises them on the turn thread once the stream finishes, so a
+dead TTS surfaces as a clean exit-2 for ``say`` / standalone ``think run``. With
+``audio_optional=True`` (the folded ``listen --live`` cognition) an audio-sink
+failure instead degrades to "no speech" — logged once, the clip skipped, the turn
+completing normally — and after a short run of consecutive failures the audio sink
+latches off entirely. Cognition keeps thinking and every non-audio sink (expression
+motion, the export feed) keeps receiving the thought, because those are driven on
+the producer thread ahead of the speak worker.
 
 Determinism
 -----------
@@ -54,6 +63,7 @@ style, so tests run bounded and fully deterministic.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -78,8 +88,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "lists."
 )
 
+logger = logging.getLogger(__name__)
+
 # Default minimum gap between turns in the run() loop (seconds).
 DEFAULT_TURN_INTERVAL = 1.0
+
+# Consecutive audio-sink failures (in audio_optional mode) before the engine
+# latches the audio sink off — see CognitionEngine._note_audio_failure. A small
+# streak (not 1) tolerates a single transient blip without muting the session.
+DEFAULT_AUDIO_MUTE_THRESHOLD = 2
 
 
 # ---------------------------------------------------------------------------
@@ -219,11 +236,28 @@ class CognitionEngine:
         playback_kwargs: dict | None = None,
         sleep: Callable[[float], None] | None = None,
         turn_interval: float = DEFAULT_TURN_INTERVAL,
+        audio_optional: bool = False,
     ) -> None:
         self._buffer = buffer
         self._stream_sentences = stream_sentences or _llm.stream_sentences
         self._synthesize = synthesize or _tts.synthesize
         self._play_audio = play_audio or _playback.play_audio
+        # Audio-optional mode: when True a synth/playback failure degrades to
+        # "no speech" instead of aborting the turn (and killing cognition). The
+        # thought still flows to every other sink — expression motion + the export
+        # feed are produced on the producer thread, ahead of and independent of the
+        # speak worker — so a screen/log consumer is unaffected by a dead TTS. After
+        # ``DEFAULT_AUDIO_MUTE_THRESHOLD`` consecutive failures the audio sink latches
+        # off (no further synth attempts) so a hard-down TTS never throttles cognition
+        # to one turn per request-timeout. Default False keeps the strict, fail-fast
+        # contract (an unreachable TTS raises CliError → exit 2) for `say`/standalone
+        # `think run`; the folded `listen --live` cognition opts in. The threshold is a
+        # module constant (not a ctor arg) — internal tuning, rarely overridden; tests
+        # set ``_audio_mute_threshold`` directly when they need a different value.
+        self._audio_optional = audio_optional
+        self._audio_mute_threshold = DEFAULT_AUDIO_MUTE_THRESHOLD
+        self._audio_muted = False
+        self._audio_fail_streak = 0
         # Optional motion seam: fired once per expression marker, in stream order.
         # None → a no-op (markers parsed out of the speech, emoji simply not driven).
         self._express = express
@@ -266,8 +300,10 @@ class CognitionEngine:
         Raises
         ------
         reachy.cli._errors.CliError
-            Propagated unchanged from the LLM / TTS / playback collaborators
-            (e.g. an unreachable endpoint). Never swallowed.
+            Propagated unchanged from the LLM collaborator (e.g. an unreachable
+            endpoint). TTS / playback errors propagate the same way **unless**
+            ``audio_optional`` is set, in which case they are absorbed by the speak
+            worker (logged once, speech skipped) and the turn completes normally.
         """
         with self._turn_lock:
             cues = self._buffer.snapshot()
@@ -378,6 +414,14 @@ class CognitionEngine:
         Stops on the :data:`_DONE` sentinel. A raised exception is stashed in
         ``error_out`` for the turn thread to re-raise (it cannot escape a worker
         thread on its own).
+
+        Audio-optional mode (:attr:`_audio_optional`): a synth/playback failure on a
+        spoken item is logged once and the clip skipped, rather than aborting the
+        turn — so a dead TTS no longer kills cognition. After
+        :attr:`_audio_mute_threshold` consecutive failures the audio sink latches off
+        for the rest of the engine's life (:attr:`_audio_muted`), so a hard-down TTS
+        does not throttle every turn by the synth timeout. Expression items and the
+        export feed (driven on the producer thread) are unaffected either way.
         """
         try:
             while True:
@@ -388,15 +432,56 @@ class CognitionEngine:
                 if kind == "express":
                     if self._express is not None:
                         self._express(payload)
-                    continue
-                pcm = self._synthesize(payload, **self._tts_kwargs)
-                if pcm:
-                    self._play_audio(pcm, **self._playback_kwargs)
+                elif not self._audio_muted:
+                    self._speak_clip(payload)
         except Exception as exc:  # noqa: BLE001 — re-raised on the turn thread
             error_out.append(exc)
             # Drain any remaining items so a blocked producer's put() unblocks and
             # the sentinel is consumed; we are abandoning playback for this turn.
             _drain(speak_q)
+
+    def _speak_clip(self, payload: str) -> None:
+        """Synthesize + play one spoken clip (empty synth output is skipped).
+
+        Strict mode (``audio_optional`` False) lets a synth/playback exception
+        propagate to :meth:`_speak_worker`, which stashes it for the turn thread to
+        re-raise. In audio-optional mode the failure is absorbed via
+        :meth:`_note_audio_failure` (logged once, the clip skipped) so the turn
+        completes and cognition keeps running.
+        """
+        try:
+            pcm = self._synthesize(payload, **self._tts_kwargs)
+            if pcm:
+                self._play_audio(pcm, **self._playback_kwargs)
+            self._audio_fail_streak = 0
+        except Exception:  # noqa: BLE001
+            # Strict mode re-raises (the worker stashes it for the turn thread);
+            # audio_optional absorbs it so the turn completes and cognition continues.
+            if not self._audio_optional:
+                raise
+            self._note_audio_failure()
+
+    def _note_audio_failure(self) -> None:
+        """Record one audio-sink failure in audio-optional mode (log once, maybe latch).
+
+        Logs on the first failure of a streak; once
+        :attr:`_audio_mute_threshold` consecutive failures accumulate, latches the
+        audio sink off (:attr:`_audio_muted`) so no further synth is attempted —
+        cognition keeps thinking at full speed and feeds every non-audio sink.
+        """
+        self._audio_fail_streak += 1
+        if self._audio_fail_streak == 1:
+            logger.warning(
+                "cognition audio sink failed; continuing without speech (audio is optional)",
+                exc_info=True,
+            )
+        if not self._audio_muted and self._audio_fail_streak >= self._audio_mute_threshold:
+            self._audio_muted = True
+            logger.warning(
+                "cognition audio muted after %d consecutive failures; thoughts continue "
+                "(expression + export sinks unaffected)",
+                self._audio_fail_streak,
+            )
 
     # ------------------------------------------------------------------
     # The thin loop
@@ -419,8 +504,14 @@ class CognitionEngine:
         Parameters
         ----------
         max_turns:
-            Stop after this many *spoken* turns (no-op idle turns don't count).
-            ``None`` runs until ``stop`` fires.
+            Stop after this many turns that *ran* — i.e. turns where cues existed
+            and a cognition turn was produced (LLM output + expression markers +
+            export blocks); no-op idle turns (empty buffer) don't count. ``None``
+            runs until ``stop`` fires. Note: in ``audio_optional`` mode a counted
+            turn may complete with **no audio** once the audio sink has latched off
+            — it still produced a cognition turn, so it counts. (The folded
+            ``listen --live`` loop drives ``run`` with ``stop`` and no ``max_turns``,
+            so muted turns never cause premature termination there.)
         stop:
             Optional zero-arg predicate; the loop exits when it returns truthy
             (checked before each turn). Keeps the loop testable / bounded.
@@ -433,7 +524,9 @@ class CognitionEngine:
         Returns
         -------
         int
-            The number of turns that actually spoke.
+            The number of turns that ran (produced a cognition turn). In strict
+            mode every such turn also spoke; in ``audio_optional`` mode a muted turn
+            is counted even though it played no audio.
         """
         spoken = 0
         first = True
