@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.2] - 2026-06-22
+
+### Changed
+
+- `reachy/speech/name_match.py`: extracted the per-word/per-name guard ladder into a
+  flat `_word_matches_name()` helper so `is_name_match()` is a single `any(...)` over
+  word/name pairs — behaviour byte-identical, Cognitive Complexity dropped from 18 to
+  within the 15 limit (SonarCloud maintainability). The initial guard now reads
+  `not word.startswith(name[:1])` instead of the slice comparison `word[:1] != name[:1]`
+  (SonarCloud `S6659`), behaviour-preserving for all real inputs.
+- `reachy/motion/listen_transcribe.py`: removed the unused `clock=` constructor seam
+  (it was never injected by any caller and `self._clock` was assigned but never read),
+  bringing `TranscribeHook.__init__` to 13 parameters (SonarCloud `S107`). The mute gate
+  already uses the tick's own `t`, so no behaviour changes.
+
+## [0.28.1] - 2026-06-22
+
+### Fixed
+
+- `reachy/speech/llm.py`: the non-streaming `complete()` (engagement classifier) now
+  sends `Accept: application/json` instead of the streaming `Accept: text/event-stream`,
+  so an OpenAI-compatible server can no longer reply with an SSE body that breaks the
+  `json.loads` and degrades the classifier for no reason (Qodo review #2).
+- `reachy/motion/listen.py`: the one-shot engaged latch (`set_engaged`) is now consumed
+  **only** on a tick that carries a usable `doa_angle`. A transient `doa_angle is None`
+  tick — silence right after an addressed utterance, or a degraded DoA read — no longer
+  swallows the latch, so the deliberate engaged turn-toward-the-speaker is never silently
+  lost (Qodo review #3).
+
+## [0.28.0] - 2026-06-21
+
+### Added
+
+- Layered engagement gate under `listen run --live --transcribe`: fuzzy name fast-path
+  (`reachy/speech/name_match.py`) recognises "reachy"/"robot" and common STT mishearings
+  ("richie", "reachie") with an initial-letter guard, engaging immediately with no LLM
+  call; for nameless utterances a single-shot LLM classifier
+  (`reachy/speech/engagement.py`, `EngagementClassifier`) judges "is this addressed to
+  the robot, given recent conversation?" — ENGAGE on yes, DROP on ambient chatter.
+- `REACHY_ENGAGE_HEURISTIC=1` escape hatch: set to bypass the LLM classifier and run
+  the original coherent-sentence-in-window heuristic for the full process lifetime.
+- DEGRADE graceful degradation: if the classifier errors or times out, the gate silently
+  falls back to the heuristic so the hearing loop never stalls.
+- `reachy/speech/llm.py` non-streaming `complete()` — single-shot completion used by
+  the classifier (tight ~5 s timeout, same `REACHY_OPENAI_*` endpoint as cognition).
+
+### Changed
+
+- 3-tier motion ladder under `--transcribe` replaces the previous blanket turn
+  suppression: ambient noise → Tier-1 antenna lean; detected speech → bounded head-only
+  orienting nudge toward DoA; engaged utterance (gate ENGAGE) → deliberate head/body
+  turn toward the speaker's DoA, clamped to a minimum duration to prevent SDK
+  `goto` planner faults. The robot now faces you when you speak to it.
+
 ## [0.27.0] - 2026-06-21
 
 ### Added
