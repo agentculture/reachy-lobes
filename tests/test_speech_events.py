@@ -6,7 +6,9 @@ implementation.  Run with:  uv run pytest tests/test_speech_events.py -q
 
 from __future__ import annotations
 
+import logging
 import math
+import re
 import threading
 import time
 from typing import List
@@ -14,6 +16,21 @@ from typing import List
 import pytest
 
 from reachy.speech.events import EventBuffer, SenseCue
+
+# ---------------------------------------------------------------------------
+# [SENSE] cue instrumentation (task t4) — shared with tests/test_senselog.py
+# ---------------------------------------------------------------------------
+
+_SENSE_LOGGER_NAME = "reachy.sense"
+_SENSE_LINE_RE = re.compile(
+    r"^\[SENSE stage=(?P<stage>\S+) source=(?P<source>\S+) event=(?P<event>\S+)\] "
+    r"(?P<detail>.*)$"
+)
+
+
+def _sense_records(caplog) -> list:
+    return [r for r in caplog.records if r.name == _SENSE_LOGGER_NAME]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -424,3 +441,408 @@ class TestFeedTranscript:
         messages = build_messages("system prompt", cues)
         user_msg = messages[1]["content"]
         assert "the robot is alive" in user_msg
+
+
+# ---------------------------------------------------------------------------
+# feed_pat
+# ---------------------------------------------------------------------------
+
+
+class TestFeedPat:
+    """feed_pat(kind, level) -> correct touch cues."""
+
+    def test_scratch_level2_is_firm(self):
+        buf = _make_buffer()
+        buf.feed_pat("scratch", "level2")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "felt a firm scratch on the head"
+
+    def test_side_pat_level1_is_gentle(self):
+        buf = _make_buffer()
+        buf.feed_pat("side_pat", "level1")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "felt a gentle sideways nudge on the head"
+
+    def test_scratch_level1_is_gentle(self):
+        buf = _make_buffer()
+        buf.feed_pat("scratch", "level1")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "felt a gentle scratch on the head"
+
+    def test_side_pat_level2_is_firm(self):
+        buf = _make_buffer()
+        buf.feed_pat("side_pat", "level2")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "felt a firm sideways nudge on the head"
+
+    def test_unknown_kind_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_pat("tickle", "level1")
+        cues = buf.snapshot()
+        assert len(cues) == 0
+
+    def test_unknown_level_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_pat("scratch", "level3")
+        cues = buf.snapshot()
+        assert len(cues) == 0
+
+    def test_unknown_kind_and_level_does_not_raise(self):
+        buf = _make_buffer()
+        buf.feed_pat("nonsense", "nonsense")
+        cues = buf.snapshot()
+        assert len(cues) == 0
+
+    def test_pat_cue_has_timestamp_from_injected_clock(self):
+        tick = [0.0]
+
+        def clock():
+            tick[0] += 1.0
+            return tick[0]
+
+        buf = _make_buffer(clock=clock)
+        buf.feed_pat("scratch", "level1")
+        cues = buf.snapshot()
+        assert cues[0].timestamp == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# feed_face (task t9)
+# ---------------------------------------------------------------------------
+
+
+class TestFeedFace:
+    """feed_face(name) -> a 'saw <name>' cue for a known/named face."""
+
+    def test_known_name_appends_saw_cue(self):
+        buf = _make_buffer()
+        buf.feed_face("Ada")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "saw Ada"
+
+    def test_name_is_stripped(self):
+        buf = _make_buffer()
+        buf.feed_face("  Ada  ")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "saw Ada"
+
+    def test_empty_name_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_face("")
+        assert buf.snapshot() == []
+
+    def test_whitespace_only_name_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_face("   ")
+        assert buf.snapshot() == []
+
+    def test_none_name_does_not_raise(self):
+        buf = _make_buffer()
+        buf.feed_face(None)  # type: ignore[arg-type]
+        assert buf.snapshot() == []
+
+    def test_face_cue_has_timestamp_from_injected_clock(self):
+        tick = [0.0]
+
+        def clock():
+            tick[0] += 1.0
+            return tick[0]
+
+        buf = _make_buffer(clock=clock)
+        buf.feed_face("Ada")
+        cues = buf.snapshot()
+        assert cues[0].timestamp == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# feed_scene (task t10)
+# ---------------------------------------------------------------------------
+
+
+class TestFeedScene:
+    """feed_scene(text) -> a 'noticed: <text>' cue for a VLM scene description."""
+
+    def test_scene_text_appends_noticed_cue(self):
+        buf = _make_buffer()
+        buf.feed_scene("a person waving at the desk")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "noticed: a person waving at the desk"
+
+    def test_scene_text_is_stripped(self):
+        buf = _make_buffer()
+        buf.feed_scene("  a red mug  ")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "noticed: a red mug"
+
+    def test_empty_text_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_scene("")
+        assert buf.snapshot() == []
+
+    def test_whitespace_only_text_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_scene("   ")
+        assert buf.snapshot() == []
+
+    def test_none_text_does_not_raise(self):
+        buf = _make_buffer()
+        buf.feed_scene(None)  # type: ignore[arg-type]
+        assert buf.snapshot() == []
+
+    def test_scene_cue_has_timestamp_from_injected_clock(self):
+        tick = [0.0]
+
+        def clock():
+            tick[0] += 1.0
+            return tick[0]
+
+        buf = _make_buffer(clock=clock)
+        buf.feed_scene("a lamp turned on")
+        cues = buf.snapshot()
+        assert cues[0].timestamp == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# feed_forge — forge self-extension announce cue (Qodo finding: was
+# mislabeled as a scene cue via feed_scene)
+# ---------------------------------------------------------------------------
+
+
+class TestFeedForge:
+    """feed_forge(text) -> the text verbatim, as a forge-sourced cue (no prefix)."""
+
+    def test_forge_text_appends_verbatim_cue(self):
+        buf = _make_buffer()
+        buf.feed_forge("learned a new skill: wave-hello")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "learned a new skill: wave-hello"
+
+    def test_forge_text_is_not_prefixed_like_a_scene_cue(self):
+        """The forge cue must never read as 'noticed: ...' (that would be feed_scene)."""
+        buf = _make_buffer()
+        buf.feed_forge("learned a new skill: wave-hello")
+        cues = buf.snapshot()
+        assert not cues[0].text.startswith("noticed:")
+
+    def test_forge_text_is_stripped(self):
+        buf = _make_buffer()
+        buf.feed_forge("  learned a new skill: wave-hello  ")
+        cues = buf.snapshot()
+        assert len(cues) == 1
+        assert cues[0].text == "learned a new skill: wave-hello"
+
+    def test_empty_text_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_forge("")
+        assert buf.snapshot() == []
+
+    def test_whitespace_only_text_appends_no_cue(self):
+        buf = _make_buffer()
+        buf.feed_forge("   ")
+        assert buf.snapshot() == []
+
+    def test_none_text_does_not_raise(self):
+        buf = _make_buffer()
+        buf.feed_forge(None)  # type: ignore[arg-type]
+        assert buf.snapshot() == []
+
+    def test_forge_cue_has_timestamp_from_injected_clock(self):
+        tick = [0.0]
+
+        def clock():
+            tick[0] += 1.0
+            return tick[0]
+
+        buf = _make_buffer(clock=clock)
+        buf.feed_forge("learned a new skill: wave-hello")
+        cues = buf.snapshot()
+        assert cues[0].timestamp == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# [SENSE] cue instrumentation (task t4)
+#
+# Every feed_* call that actually appends a cue emits exactly one parseable
+# [SENSE stage=cue source=<feed kind> event=<id>] <cue text> line on the
+# dedicated "reachy.sense" logger. A feed that produces NO cue because of a
+# threshold stays silent — that is a deliberate no-op, not a drop.
+# ---------------------------------------------------------------------------
+
+
+class TestSenseLogCueInstrumentation:
+    def test_feed_doa_speech_cue_logs_one_sense_line(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_doa(angle_rad=0.0, rms=0.1, is_speech=True)
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "doa"
+        assert "speech from the left" in match.group("detail")
+
+    def test_feed_doa_loud_sound_cue_logs_one_sense_line(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_doa(angle_rad=0.3, rms=0.5, is_speech=False)
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        assert "loud sound" in records[0].getMessage()
+
+    def test_feed_doa_below_threshold_stays_silent(self, caplog):
+        """Ambient (quiet, non-speech) noise produces no cue and no [SENSE] line."""
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_doa(angle_rad=0.0, rms=0.001, is_speech=False)
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_doa_no_angle_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_doa(angle_rad=None, rms=0.9, is_speech=True)
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_vision_motion_cue_logs_one_sense_line(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_vision(motion_direction=-0.7, brightness_delta=0.0)
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "vision"
+        assert "motion" in match.group("detail")
+
+    def test_feed_vision_two_cues_logs_two_sense_lines(self, caplog):
+        """motion + a significant brightness change in one feed -> two [SENSE] lines."""
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_vision(motion_direction=-0.5, brightness_delta=20.0)
+
+        records = _sense_records(caplog)
+        assert len(records) == 2
+        assert all(r.getMessage().startswith("[SENSE stage=cue source=vision") for r in records)
+
+    def test_feed_vision_below_threshold_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_vision(motion_direction=None, brightness_delta=1.0)
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_transcript_logs_one_sense_line_with_cue_text(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_transcript("hello world")
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "transcript"
+        assert "hello world" in match.group("detail")
+
+    def test_feed_transcript_empty_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_transcript("   ")
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_pat_logs_one_sense_line_with_cue_text(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_pat("scratch", "level2")
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "pat"
+        assert "firm scratch" in match.group("detail")
+
+    def test_feed_pat_unknown_kind_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_pat("tickle", "level1")
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_face_logs_one_sense_line_with_source_face(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_face("Ada")
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "face"
+        assert "saw Ada" in match.group("detail")
+
+    def test_feed_face_empty_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_face("")
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_scene_logs_one_sense_line_with_source_scene(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_scene("a person at a whiteboard")
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "scene"
+        assert "noticed: a person at a whiteboard" in match.group("detail")
+
+    def test_feed_scene_empty_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_scene("   ")
+
+        assert _sense_records(caplog) == []
+
+    def test_feed_forge_logs_one_sense_line_with_source_forge(self, caplog):
+        """Regression test (Qodo finding): a forge cue must log source=forge, not source=scene."""
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_forge("learned a new skill: wave-hello")
+
+        records = _sense_records(caplog)
+        assert len(records) == 1
+        match = _SENSE_LINE_RE.match(records[0].getMessage())
+        assert match is not None
+        assert match.group("stage") == "cue"
+        assert match.group("source") == "forge"
+        assert "learned a new skill: wave-hello" in match.group("detail")
+
+    def test_feed_forge_empty_stays_silent(self, caplog):
+        buf = _make_buffer()
+        with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+            buf.feed_forge("   ")
+
+        assert _sense_records(caplog) == []

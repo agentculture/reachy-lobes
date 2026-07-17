@@ -27,6 +27,7 @@ Acceptance criteria (task t6)
 from __future__ import annotations
 
 import json
+import logging
 import threading
 
 import pytest
@@ -38,8 +39,19 @@ from reachy.speech.agent_turn import (
     DEFAULT_AGENT_SYSTEM_PROMPT,
     AgentTurnEngine,
 )
-from reachy.speech.events import EventBuffer
+from reachy.speech.events import EventBuffer, SenseCue
 from reachy.speech.llm import ToolCall, TurnResult
+
+# ---------------------------------------------------------------------------
+# [SENSE] instrumentation (task t4)
+# ---------------------------------------------------------------------------
+
+_SENSE_LOGGER_NAME = "reachy.sense"
+
+
+def _sense_records(caplog) -> list:
+    return [r for r in caplog.records if r.name == _SENSE_LOGGER_NAME]
+
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -130,6 +142,22 @@ def _err_content(msg: str = "boom") -> str:
 
 def _last_is_tool(messages) -> bool:
     return bool(messages) and messages[-1].get("role") == "tool"
+
+
+class _FakeCueBuffer:
+    """Minimal ``_BufferLike`` fake: a fixed list of cues, drained once by snapshot().
+
+    Used to exercise the engine with a cue kind (e.g. touch) that has no producer
+    on ``EventBuffer`` yet, without depending on a sibling task's in-flight
+    ``feed_pat``-style API.
+    """
+
+    def __init__(self, cues: list[SenseCue]) -> None:
+        self._cues = cues
+
+    def snapshot(self) -> list[SenseCue]:
+        cues, self._cues = self._cues, []
+        return cues
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +644,156 @@ def test_default_system_prompt_is_a_module_constant():
     assert "Reachy" in DEFAULT_AGENT_SYSTEM_PROMPT
     # It names the tool-only contract so ops can see (and tune) the guidance.
     assert "tool" in DEFAULT_AGENT_SYSTEM_PROMPT.lower()
+
+
+def test_default_system_prompt_names_touch_as_a_perception():
+    """A sibling task feeds pat/touch cues into the buffer — the prompt must give
+    the model a frame for them (e.g. "touch" or "petted"/"patted")."""
+    lowered = DEFAULT_AGENT_SYSTEM_PROMPT.lower()
+    assert "touch" in lowered or "petted" in lowered or "patted" in lowered
+
+
+# ---------------------------------------------------------------------------
+# Touch/pat perception (t5)
+# ---------------------------------------------------------------------------
+
+
+def test_pat_only_cue_triggers_an_agent_turn():
+    """A lone touch cue (no words, no DoA) is enough to fire a turn, and the cue
+    text reaches the LLM as part of the user perception message."""
+    reg = FakeRegistry()
+    cue_text = "felt a gentle scratch on the head"
+    buf = _FakeCueBuffer([SenseCue(text=cue_text, timestamp=0.0)])
+    turn = ScriptedTurn(lambda m: TurnResult(content="aww", tool_calls=[], finish_reason="stop"))
+    engine = AgentTurnEngine(buffer=buf, registry=reg, turn_fn=turn)
+
+    assert engine.run_turn() is True
+    assert len(turn.calls) == 1
+    user_messages = [m for m in turn.calls[0] if m.get("role") == "user"]
+    assert any(cue_text in m.get("content", "") for m in user_messages)
+
+
+# ---------------------------------------------------------------------------
+# [SENSE] instrumentation (task t4)
+# ---------------------------------------------------------------------------
+
+
+def test_run_turn_logs_a_sense_turn_line_with_cue_count(caplog):
+    """A turn that fires logs exactly one [SENSE stage=turn] line naming the cue count."""
+    reg = FakeRegistry()
+    turn = ScriptedTurn(lambda m: TurnResult(content="ok", tool_calls=[], finish_reason="stop"))
+    engine = AgentTurnEngine(buffer=_buf_with_cue(), registry=reg, turn_fn=turn)
+
+    with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+        assert engine.run_turn() is True
+
+    records = _sense_records(caplog)
+    turn_records = [r for r in records if "stage=turn" in r.getMessage()]
+    assert len(turn_records) == 1
+    assert "cue_count=1" in turn_records[0].getMessage()
+
+
+def test_run_turn_no_cues_logs_no_sense_turn_line(caplog):
+    """An empty-buffer no-op turn never fires the stage=turn line."""
+    reg = FakeRegistry()
+    turn = ScriptedTurn(lambda m: TurnResult(content="x", tool_calls=[], finish_reason="stop"))
+    engine = AgentTurnEngine(buffer=EventBuffer(clock=_const_clock()), registry=reg, turn_fn=turn)
+
+    with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+        assert engine.run_turn() is False
+
+    assert _sense_records(caplog) == []
+
+
+def test_audio_optional_failure_logs_a_sense_drop_line(caplog):
+    """The first absorbed speak failure of a streak emits a greppable [SENSE] drop
+    line, additive to the existing warning log (not a replacement)."""
+    reg = FakeRegistry(results={"speak": _err_content()})
+    engine = AgentTurnEngine(
+        buffer=_buf_with_cue(),
+        registry=reg,
+        turn_fn=ScriptedTurn(_one_speak_turn),
+        audio_optional=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+        engine.run_turn()
+
+    records = _sense_records(caplog)
+    drop_records = [r for r in records if "dropped reason=audio-muted" in r.getMessage()]
+    assert len(drop_records) == 1
+    assert drop_records[0].getMessage().startswith("[SENSE stage=action")
+
+
+def test_audio_latch_logs_a_second_sense_drop_line_when_muted(caplog):
+    """Reaching the mute threshold fires its own drop line, in addition to the
+    first-failure drop line — one per existing warning call site."""
+    reg = FakeRegistry(results={"speak": _err_content()})
+    buf = _buf_with_cue()
+    engine = AgentTurnEngine(
+        buffer=buf,
+        registry=reg,
+        turn_fn=ScriptedTurn(_one_speak_turn),
+        audio_optional=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger=_SENSE_LOGGER_NAME):
+        # DEFAULT_AUDIO_MUTE_THRESHOLD == 2: turn1 -> first-failure drop, turn2 ->
+        # mute-threshold drop. Two turns, two drop lines total.
+        for _ in range(2):
+            engine.run_turn()
+            _refill(buf)
+
+    records = _sense_records(caplog)
+    drop_records = [r for r in records if "dropped reason=audio-muted" in r.getMessage()]
+    assert len(drop_records) == 2
+
+
+# ---------------------------------------------------------------------------
+# Hot registration — the tool list is rebuilt per turn (task t13 restart-note)
+# ---------------------------------------------------------------------------
+
+
+def test_hot_registered_tool_is_callable_on_the_next_turn():
+    """t13 restart-note finding: the engine reads ``registry.tools()`` FRESH on every
+    round of every turn (agent_turn.py, ``_run_agent_turn``), so a tool hot-registered
+    into the LIVE registry between turns is published on the very next turn — no
+    per-session snapshot, no restart, no deferred-until-restart line needed."""
+    reg = FakeRegistry()
+    turn = ScriptedTurn(lambda m: TurnResult(content="ok", tool_calls=[], finish_reason="stop"))
+    engine = AgentTurnEngine(buffer=_buf_with_cue(), registry=reg, turn_fn=turn)
+
+    engine.run_turn()
+    tools_turn1 = [d["function"]["name"] for d in turn.kwargs[-1]["tools"]]
+    assert "wave-hello" not in tools_turn1
+
+    # Hot-register a new tool into the LIVE registry (exactly what forge activation does).
+    reg._defs.append({"type": "function", "function": {"name": "wave-hello", "parameters": {}}})
+
+    _refill(engine.buffer)
+    engine.run_turn()
+    tools_turn2 = [d["function"]["name"] for d in turn.kwargs[-1]["tools"]]
+    assert "wave-hello" in tools_turn2, "a tool registered between turns must be callable next turn"
+
+
+def test_agent_turn_module_does_not_import_forge():
+    """CRITICAL BOUNDARY (task t13): agent_turn.py must not import reachy.forge — the
+    forge dispatch/activation seams arrive injected at composition, never imported here."""
+    import ast
+    import inspect
+
+    import reachy.speech.agent_turn as agent_mod
+
+    tree = ast.parse(inspect.getsource(agent_mod))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name)
+    for name in names:
+        assert "reachy.forge" not in name, f"agent_turn.py must not import forge ({name!r})"
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,6 +1,6 @@
 [project]
 name = "reachy-mini-cli"
-version = "0.32.0"
+version = "0.34.1"
 description = "Agent and CLI for operating the Reachy Mini expressive robot — device setup, app management, and runtime ops."
 readme = "README.md"
 license = "MIT"
@@ -32,8 +32,15 @@ dependencies = ["numpy>=1.24", "harmonics-cli>=0.8"]
 # `[daemon]` signals "I need the reachy-mini-daemon binary" and `[sdk]` signals "I need the
 # in-process SDK client" — both resolve to the same reachy-mini wheel.
 [project.optional-dependencies]
-daemon = ["reachy-mini>=1.0"]
-sdk = ["reachy-mini>=1.0"]
+# Pinned to the 1.9.x line so the in-process SDK client matches the
+# reachy-mini-daemon binary that ships in the same wheel: a client/daemon version
+# skew (e.g. installed SDK 1.7.3 vs daemon 1.9.0) emits a RuntimeWarning at client
+# open and silently breaks the camera media path (all-None frames). Keeping both
+# extras on the same 1.9.x wheel is what keeps client and daemon in lockstep. The
+# `<1.10` upper bound guards against the next minor's API changes re-introducing
+# the same skew class (the camera surface already moved once: 1.7 → 1.9).
+daemon = ["reachy-mini>=1.9.0,<1.10"]
+sdk = ["reachy-mini>=1.9.0,<1.10"]
 # Generic compute-class extras — intentionally broad so they also serve future
 # features beyond wake detection.
 # [cpu] is the home for on-box openwakeword (lazy-loaded; openwakeword lacks a
@@ -45,6 +52,15 @@ sdk = ["reachy-mini>=1.0"]
 # Do NOT promote any engine package to base dependencies.
 cpu = []
 gpu = []
+# [vision] — OpenCV (headless: no GTK/Qt GUI bindings needed on a headless
+# robot box) for the face-recognition engine (reachy/vision/face.py, ported
+# from reachy_nova's YuNet+SFace face_recognition.py + face_manager.py). Like
+# [sdk]/[daemon]/[cpu], this is lazy-imported and stays an extra rather than a
+# base dep — cv2 is a much heavier wheel than numpy/harmonics-cli, and the
+# bare-install HTTP remote profile has no camera to run it against anyway. A
+# missing extra raises the same clean exit-2 CliError pattern as the other
+# lazy-imported engines.
+vision = ["opencv-python-headless>=4.9,<5"]
 
 [project.urls]
 Homepage = "https://github.com/agentculture/reachy-mini-cli"

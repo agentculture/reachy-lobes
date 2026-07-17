@@ -64,7 +64,14 @@ class LoopHooks:
     on_tick: Callable | None = None
 
 
-def _dispatch_next(transport, q: MotionQueue, t: float, settle: float, st: "_DriveState") -> float:
+def _dispatch_next(
+    transport,
+    q: MotionQueue,
+    t: float,
+    settle: float,
+    st: "_DriveState",
+    now: Callable[[], float] | None = None,
+) -> float:
     """Issue the next queued move; record its head pose; return the new ``busy_until``.
 
     Peeks the queue and only removes the action via :meth:`~MotionQueue.pop_if`
@@ -75,9 +82,12 @@ def _dispatch_next(transport, q: MotionQueue, t: float, settle: float, st: "_Dri
     head — so a gesture a concurrent producer thread coalesced in mid-dispatch is
     never popped in its place (see :meth:`MotionQueue.pop_if`).
 
-    On acceptance the dispatched action's head pitch/yaw are stamped onto
-    ``st.commanded_head`` (axes the action omits default to ``0.0``) so the
-    ``on_tick`` hook can be handed the pose the loop actually commanded.
+    On acceptance, an action that commands the head has its pitch/yaw stamped
+    onto ``st.commanded_head`` (axes its head dict omits default to ``0.0``) so
+    the ``on_tick`` hook can be handed the pose the loop actually commanded.
+    Head-less actions (antenna-only, body-only) leave ``st.commanded_head``
+    untouched — a held head stays commanded where it was; stamping (0, 0) for
+    them flapped the commanded state and was the phantom-pat root cause.
     """
     nxt = q.peek()
     if nxt is None:  # emptied by another thread between the len() check and here
@@ -90,11 +100,29 @@ def _dispatch_next(transport, q: MotionQueue, t: float, settle: float, st: "_Dri
         interpolation=nxt.interpolation,
     )
     q.pop_if(nxt)  # accepted — remove it, unless a newer gesture took the head
-    head = nxt.head or {}
-    st.commanded_head = {"pitch": float(head.get("pitch", 0.0)), "yaw": float(head.get("yaw", 0.0))}
+    if nxt.head is not None:
+        # Only actions that actually command the head update the commanded pose.
+        # Head-less actions (antenna-only leans, body-only turns) previously
+        # stamped it back to (0, 0), flapping the commanded state target<->zero on
+        # every Tier-1 antenna dispatch — which the PatHook's expectation sensing
+        # read as huge instant "moves" and false-fired on (the phantom-pat root
+        # cause). A held head stays commanded where it was.
+        head = nxt.head
+        st.commanded_head = {
+            "pitch": float(head.get("pitch", 0.0)),
+            "yaw": float(head.get("yaw", 0.0)),
+        }
     if st.on_action is not None:
         st.on_action(nxt)
-    return t + nxt.duration + settle
+    # The SDK's move_goto may BLOCK for the move's whole duration (the live media
+    # session does). Basing the horizon on the pre-call clock then publishes a
+    # busy_until that is already ~expired when the next tick runs — every hook
+    # reading it saw a "0.14s move" for a 2.2s goto (the phantom-pat horizon bug).
+    # Take the later of plan-based and post-call clocks so the horizon is honest
+    # under BOTH semantics: non-blocking gotos get t + duration + settle exactly
+    # as before; blocking gotos get return-time + settle.
+    t_after = now() if now is not None else t
+    return max(t + nxt.duration, t_after) + settle
 
 
 @dataclass
@@ -109,12 +137,12 @@ class _DriveState:
     commanded_head: dict[str, float] = field(default_factory=lambda: {"pitch": 0.0, "yaw": 0.0})
 
 
-def _service_queue(transport, q, t, st: _DriveState, *, settle, max_errors) -> None:
+def _service_queue(transport, q, t, st: _DriveState, *, settle, max_errors, now=None) -> None:
     """If idle and something is queued, run the next move; count/raise on errors."""
     if t < st.busy_until or not len(q):
         return
     try:
-        st.busy_until = _dispatch_next(transport, q, t, settle, st)
+        st.busy_until = _dispatch_next(transport, q, t, settle, st, now)
         st.consecutive = 0
     except CliError:
         st.consecutive += 1
@@ -135,11 +163,22 @@ def _drive(
     max_ticks,
     max_errors,
     stop,
+    busy: dict | None = None,
 ) -> int:
-    """The serial body: drain the producer into the queue, run one move at a time."""
+    """The serial body: drain the producer into the queue, run one move at a time.
+
+    When ``busy`` is a dict, the loop publishes ``busy["until"] = st.busy_until``
+    before each ``on_tick`` — the wall-clock horizon (dispatch + duration + settle)
+    the current move is in flight until. A folded hook (``listen``'s ``PatHook``)
+    reads it via a ``() -> busy["until"]`` seam when it observes a large commanded
+    jump, riding out that move's transit unsensed so its lag is never mistaken for
+    an external press (small idle moves are sensed straight through).
+    """
     st = _DriveState(on_action=hooks.on_action)
     while not stop["flag"]:
         t = now()
+        if busy is not None:
+            busy["until"] = st.busy_until
         if hooks.on_tick is not None:
             hooks.on_tick(transport, q, t, st.commanded_head)
         snap, sp = hooks.audio(t) if hooks.audio is not None else (False, None)
@@ -147,7 +186,7 @@ def _drive(
         action = producer.update(t, sense_val, snap=snap, sound_present=sp)
         if action is not None:
             q.submit(action)
-        _service_queue(transport, q, t, st, settle=settle, max_errors=max_errors)
+        _service_queue(transport, q, t, st, settle=settle, max_errors=max_errors, now=now)
         st.ticks += 1
         if max_ticks is not None and st.ticks >= max_ticks:
             break
@@ -168,6 +207,7 @@ def run(
     max_ticks: int | None = None,
     max_errors: int = 5,
     stop: dict | None = None,
+    busy: dict | None = None,
 ) -> int:
     """Drive the robot from ``producer`` actions until stopped. Returns ticks run.
 
@@ -191,6 +231,13 @@ def run(
       pat (deviation = actual − commanded), so ``listen``'s own commanded turns
       never read as a press.
 
+    ``busy`` (optional) is a mutable dict the loop publishes its ``busy_until``
+    horizon into each tick (``busy["until"]``) — the wall-clock time the current
+    move is in flight until. A folded ``on_tick`` hook reads it through a probe to
+    pause sensing while a commanded move is mid-flight (so transit lag never reads
+    as an external press). Default ``None`` publishes nothing — byte-identical to
+    before for every caller that does not pass it.
+
     Moves are run one at a time via ``transport.move_goto`` — never overlapping.
     """
     q = queue if queue is not None else MotionQueue()
@@ -210,6 +257,7 @@ def run(
             max_ticks=max_ticks,
             max_errors=max_errors,
             stop=stop,
+            busy=busy,
         )
     finally:
         if handlers is not None:

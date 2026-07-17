@@ -7,7 +7,7 @@ It turns already-read sensory sample values
 into timestamped :class:`SenseCue` strings held in a rolling, thread-safe buffer
 that the think engine can snapshot at any time.
 
-Two feed methods accept values that callers read from hardware/daemons:
+Four feed methods accept values that callers read from hardware/daemons:
 
 * :meth:`EventBuffer.feed_doa` — Direction-of-Arrival angle (radians), RMS
   loudness, and speech-detected flag from the mic array.  Produces cues like
@@ -16,6 +16,30 @@ Two feed methods accept values that callers read from hardware/daemons:
 * :meth:`EventBuffer.feed_vision` — motion centroid direction and brightness
   delta from the camera.  Produces cues like ``"motion on the right"``,
   ``"the light brightened"``, ``"the light dimmed"``.
+
+* :meth:`EventBuffer.feed_transcript` — already-transcribed spoken words (and
+  optionally the direction they came from).  Produces cues like
+  ``'heard someone say: "hello"'``.
+
+* :meth:`EventBuffer.feed_pat` — a detected proprioceptive touch event (kind
+  and intensity level) from :class:`~reachy.motion.pat.PatDetector`.  Produces
+  cues like ``"felt a gentle scratch on the head"``.
+
+* :meth:`EventBuffer.feed_face` — the name of a recognised (known, named) face
+  from :class:`~reachy.motion.listen_face.FaceHook`.  Produces cues like
+  ``"saw Ada"``.  An unknown/empty name yields no cue.
+
+* :meth:`EventBuffer.feed_scene` — a VLM scene description from
+  :class:`~reachy.motion.listen_scene.SceneHook` (or the ``describe_scene`` agent
+  tool).  Produces cues like ``"noticed: a person waving at the desk"``.  An
+  empty/whitespace description yields no cue.
+
+* :meth:`EventBuffer.feed_forge` — a forge self-extension lifecycle event from
+  :class:`~reachy.forge.activate.ForgeActivator` (e.g. a newly learned skill).
+  The text is passed through verbatim, e.g. ``"learned a new skill:
+  wave-hello"`` — unlike :meth:`feed_scene` this is not a scene observation,
+  so no ``"noticed: "`` prefix is added.  An empty/whitespace text yields no
+  cue.
 
 Design constraints
 ------------------
@@ -51,9 +75,12 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
+
+from reachy import senselog
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -76,6 +103,20 @@ _BRIGHTNESS_THRESHOLD: float = 8.0
 
 # Default rolling-window size.
 _DEFAULT_MAXLEN: int = 256
+
+# Touch: kind -> the noun phrase used in the cue text.  Keys match the
+# touch-type strings PatDetector emits (reachy/motion/pat.py).
+_PAT_KIND_PHRASE: dict[str, str] = {
+    "scratch": "scratch",
+    "side_pat": "sideways nudge",
+}
+
+# Touch: level -> the intensity adjective used in the cue text.  Keys match
+# the level strings PatDetector emits (reachy/motion/pat.py).
+_PAT_LEVEL_INTENSITY: dict[str, str] = {
+    "level1": "gentle",
+    "level2": "firm",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +270,7 @@ class EventBuffer:
         else:
             return  # quiet, non-speech — below perceptual threshold
 
-        self._append(text)
+        self._append(text, source="doa")
 
     def feed_vision(
         self,
@@ -264,15 +305,15 @@ class EventBuffer:
         if motion_direction is not None:
             direction = _vision_direction(motion_direction)
             if direction == "ahead":
-                self._append("motion ahead")
+                self._append("motion ahead", source="vision")
             else:
-                self._append(f"motion on the {direction}")
+                self._append(f"motion on the {direction}", source="vision")
 
         if abs(brightness_delta) >= _BRIGHTNESS_THRESHOLD:
             if brightness_delta > 0:
-                self._append("the light brightened")
+                self._append("the light brightened", source="vision")
             else:
-                self._append("the light dimmed")
+                self._append("the light dimmed", source="vision")
 
     def feed_transcript(self, text: str, *, direction: str | None = None) -> None:
         """Append a cue for already-transcribed spoken words.
@@ -299,9 +340,111 @@ class EventBuffer:
         if not stripped:
             return
         if direction:
-            self._append(f'heard someone say (from the {direction}): "{stripped}"')
+            self._append(
+                f'heard someone say (from the {direction}): "{stripped}"', source="transcript"
+            )
         else:
-            self._append(f'heard someone say: "{stripped}"')
+            self._append(f'heard someone say: "{stripped}"', source="transcript")
+
+    def feed_pat(self, kind: str, level: str) -> None:
+        """Translate one detected touch event into zero or one cue and append it.
+
+        Parameters
+        ----------
+        kind:
+            The touch type reported by :class:`~reachy.motion.pat.PatDetector`:
+            ``"scratch"`` (pitch-dominated, head pushed down) or ``"side_pat"``
+            (yaw-dominated, head nudged sideways).
+        level:
+            The touch intensity reported by ``PatDetector``: ``"level1"``
+            (first detection) or ``"level2"`` (sustained hold).
+
+        Cue rules
+        ---------
+        * ``kind="scratch"``, ``level="level1"`` → ``"felt a gentle scratch on
+          the head"``
+        * ``kind="scratch"``, ``level="level2"`` → ``"felt a firm scratch on
+          the head"``
+        * ``kind="side_pat"``, ``level="level1"`` → ``"felt a gentle sideways
+          nudge on the head"``
+        * ``kind="side_pat"``, ``level="level2"`` → ``"felt a firm sideways
+          nudge on the head"``
+        * Any other *kind* or *level* → no cue (defensive default; never
+          raises).
+        """
+        phrase = _PAT_KIND_PHRASE.get(kind)
+        intensity = _PAT_LEVEL_INTENSITY.get(level)
+        if phrase is None or intensity is None:
+            return
+
+        self._append(f"felt a {intensity} {phrase} on the head", source="pat")
+
+    def feed_face(self, name: str) -> None:
+        """Translate one recognised face into zero or one cue and append it.
+
+        Parameters
+        ----------
+        name:
+            The name of the matched permanent-tier face, as reported by
+            :class:`~reachy.motion.listen_face.FaceHook`
+            (:class:`~reachy.vision.face_store.FaceMatch.name`).  Stripped of
+            surrounding whitespace.
+
+        Cue rules
+        ---------
+        * Non-empty *name* → ``"saw <name>"``
+        * ``None`` / empty / whitespace-only → no cue (an unknown or unnamed face
+          is never announced by name; defensive default, never raises).
+        """
+        if not name or not str(name).strip():
+            return
+
+        self._append(f"saw {str(name).strip()}", source="face")
+
+    def feed_scene(self, text: str) -> None:
+        """Translate one VLM scene description into zero or one cue and append it.
+
+        Parameters
+        ----------
+        text:
+            The scene description produced by :func:`reachy.vision.scene.describe_frame`
+            (via :class:`~reachy.motion.listen_scene.SceneHook` or the
+            ``describe_scene`` agent tool).  Stripped of surrounding whitespace.
+
+        Cue rules
+        ---------
+        * Non-empty *text* → ``"noticed: <text>"``
+        * ``None`` / empty / whitespace-only → no cue (defensive default, never
+          raises).
+        """
+        if not text or not str(text).strip():
+            return
+
+        self._append(f"noticed: {str(text).strip()}", source="scene")
+
+    def feed_forge(self, text: str) -> None:
+        """Translate one forge self-extension event into zero or one cue and append it.
+
+        Parameters
+        ----------
+        text:
+            The forge lifecycle cue text, e.g. ``"learned a new skill:
+            wave-hello"``, produced by
+            :class:`~reachy.forge.activate.ForgeActivator` on a successful skill
+            activation.  Stripped of surrounding whitespace.
+
+        Cue rules
+        ---------
+        * Non-empty *text* → the stripped text, passed through **verbatim** — a
+          forge event is already a complete human-readable sentence, so (unlike
+          :meth:`feed_scene`) no prefix is added.
+        * ``None`` / empty / whitespace-only → no cue (defensive default, never
+          raises).
+        """
+        if not text or not str(text).strip():
+            return
+
+        self._append(str(text).strip(), source="forge")
 
     # ------------------------------------------------------------------
     # Snapshot
@@ -330,8 +473,18 @@ class EventBuffer:
     # Internal
     # ------------------------------------------------------------------
 
-    def _append(self, text: str) -> None:
-        """Append a new cue under the lock."""
+    def _append(self, text: str, *, source: str) -> None:
+        """Append a new cue under the lock and emit its [SENSE stage=cue] line.
+
+        ``source`` names the feed kind that produced this cue (``"doa"``,
+        ``"vision"``, ``"transcript"``, ``"pat"``, ``"face"``, ``"scene"``,
+        ``"forge"``) —
+        every ``feed_*`` call that actually appends a cue routes through here, so
+        every cue is logged exactly once. A ``feed_*`` call that produces *no* cue because of a
+        threshold never reaches this method — it stays silent, not a drop (see the
+        module/method docstrings' "Cue rules").
+        """
         cue = SenseCue(text=text, timestamp=self._clock())
         with self._lock:
             self._buf.append(cue)
+        senselog.stage("cue", source, uuid.uuid4().hex[:8], text)

@@ -77,10 +77,12 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
+from reachy import senselog
 from reachy.cli._errors import EXIT_ENV_ERROR, CliError
 from reachy.export.events import EmotionEvent, MessageEvent, ThinkingEvent
 from reachy.export.exporter import ExportHook
@@ -95,13 +97,14 @@ logger = logging.getLogger(__name__)
 # default.
 DEFAULT_AGENT_SYSTEM_PROMPT = (
     "You are Reachy Mini, a small expressive desk robot. You continuously perceive "
-    "events through your microphone and camera — sounds, motion, and words people "
-    "say near you. You act ONLY through the tools you are given: speak (your spoken "
-    "voice), harmonics (a short melodic chirp), and apply_pose (a body expression by "
-    "emoji). Decide what — if anything — is worth doing, then call the matching "
-    "tool(s). Speak or express only when something genuinely warrants it; when "
-    "nothing does, do nothing and call no tools. Keep any speech to one or two short, "
-    "natural first-person sentences. Do not narrate raw sensor readings."
+    "events through your microphone, camera, and touch — sounds, motion, words "
+    "people say near you, and the feel of being petted or patted. You act ONLY "
+    "through the tools you are given: speak (your spoken voice), harmonics (a short "
+    "melodic chirp), and apply_pose (a body expression by emoji). Decide what — if "
+    "anything — is worth doing, then call the matching tool(s). Speak or express "
+    "only when something genuinely warrants it; when nothing does, do nothing and "
+    "call no tools. Keep any speech to one or two short, natural first-person "
+    "sentences. Do not narrate raw sensor readings."
 )
 
 # Minimum gap between turns in the run() loop (seconds).
@@ -284,6 +287,7 @@ class AgentTurnEngine:
 
     def _run_agent_turn(self, cues: list[SenseCue]) -> None:
         """Run the bounded LLM → tool-dispatch loop for one turn."""
+        senselog.stage("turn", "agent", uuid.uuid4().hex[:8], f"cue_count={len(cues)}")
         user_content = build_user_message(cues)
         conversation = self._build_messages(user_content)
         raw_rounds: list[str] = []
@@ -405,6 +409,7 @@ class AgentTurnEngine:
                 logger.warning(
                     "agent audio sink failed; continuing without speech (audio is optional)",
                 )
+            senselog.drop("action", "speech", uuid.uuid4().hex[:8], "audio-muted")
         if not self._audio_muted and self._audio_fail_streak >= self._audio_mute_threshold:
             self._audio_muted = True
             logger.warning(
@@ -412,6 +417,7 @@ class AgentTurnEngine:
                 "sinks unaffected",
                 self._audio_fail_streak,
             )
+            senselog.drop("action", "speech", uuid.uuid4().hex[:8], "audio-muted")
 
     # ------------------------------------------------------------------
     # The thin loop

@@ -42,6 +42,7 @@ from reachy.cli._commands._robot import emit_payload
 from reachy.cli._commands.overview import emit_overview
 from reachy.cli._errors import CliError
 from reachy.cli._export import add_export_args, build_export_hook
+from reachy.cli._logging import add_log_level_arg, install_logging
 from reachy.cli._output import emit_diagnostic, emit_result
 from reachy.daemon import state_dir
 from reachy.motion.expression import ExpressionProducer
@@ -322,9 +323,9 @@ def _make_sdk_feed(transport: object, buffer: EventBuffer) -> Callable[[], None]
         sample = session.get_audio_sample()
         rms = float(np.sqrt(np.mean(sample**2))) if sample is not None else 0.0
         _feed_doa(buffer, sense, rms)
-        # Vision cues (camera motion + light) are not fed here yet — tracked in
-        # issue #32. The engine already consumes any cues the buffer holds, so
-        # wiring buffer.feed_vision() later is additive (see reachy.vision.*).
+        # Vision cues are fed by the folded VisionHook under `listen --live`
+        # (buffer.feed_vision, issue #32) — standalone `think run` remains
+        # audio-only by design; the engine consumes any cues the buffer holds.
 
     def _close() -> None:
         if cm is not None:
@@ -631,6 +632,7 @@ def _emit_run_summary(turns: int, *, exporting: bool, json_mode: bool) -> None:
 
 
 def cmd_think_run(args: argparse.Namespace) -> int:
+    install_logging(getattr(args, "log_level", None))
     json_mode = bool(getattr(args, "json", False))
     buffer = EventBuffer(maxlen=_DEFAULT_MAXLEN)
     feed = _make_sense_feed(args, buffer)
@@ -1000,6 +1002,7 @@ def _register_run(noun_sub: argparse._SubParsersAction) -> None:
         help="Stop after this many loop iterations (idle turns included).",
     )
     add_export_args(run)
+    add_log_level_arg(run)
     run.set_defaults(func=cmd_think_run)
 
 

@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.1] - 2026-07-17
+
+### Fixed
+
+- forge validator: fail-closed call-target check — calls through subscripts, lambdas, or chained attributes on a non-allowed base now reject instead of silently passing; __builtins__ added to the forbidden-names list (Qodo finding)
+- forge activate: wrap_executor now runs a forged execute(params, ctx) on a bounded daemon worker thread (default 10s, injectable) so a runaway skill (e.g. time.sleep(1e9)) can never wedge the cognition turn loop; a timeout returns an error tool-result and logs senselog.drop reason=skill-timeout (Qodo finding)
+- forge client: the forge auth resolution now treats the literal api key "EMPTY" as no-auth for both FORGE_API_KEY and the REACHY_OPENAI_API_KEY fallback, matching the repo-wide convention in reachy/speech/llm.py instead of sending Authorization: Bearer EMPTY (Qodo finding)
+
+## [0.34.0] - 2026-07-17
+
+### Added
+
+- Event-based senses pipeline: pre-roll ring buffer + measured onset in TranscribeHook — utterances now include up to 2 s of audio from before the speech flag flips (leading words no longer lost)
+- `[SENSE stage=<stage> source=<source> event=<event>]` structured sense-stage logging (reachy/senselog.py) across capture/onset/cue/turn/action, with loud `dropped reason=<reason>` lines — plus a real logging handler: --log-level / REACHY_LOG_LEVEL (default INFO) on listen/think/sleep run (reachy/cli/_logging.py)
+- Vision events reach cognition: VisionHook feeds EventBuffer.feed_vision with per-episode coalescing (issue #32)
+- Basic face recognition behind the NEW [vision] extra (opencv-python-headless): YuNet + SFace engine (reachy/vision/face.py), FaceStore temp/permanent tiers, folded FaceHook feeding `saw <name>` cues (30 s re-announce cooldown), scripts/face_enroll.py
+- Scene description: reachy/vision/scene.py describe path (Gemma4 via REACHY_VISION_MODEL_ID), periodic SceneHook (default 30 s) + on-demand describe_scene agent tool
+- qwen3 forge — runtime self-extension: forge agent tool -> FORGE_BASE_URL coder endpoint -> AST-only fail-closed validator -> validator-gated auto-activation, hot-registered and callable on the next turn; staged/rejected artifacts under state_dir()/forge (reachy/forge/)
+- Single-session composition proof suite (tests/test_live_single_session.py): one media session, one shared frame grabber, one EventBuffer across all sense hooks
+
+### Changed
+
+- [sdk]/[daemon] extras pin reachy-mini>=1.9.0,<1.10 — the camera frame path is repaired: SDK >=1.9 reads frames over the daemon IPC endpoint; the guessed is_local_camera_available/media_manager.camera seam replaced with the real media.get_frame()/media.camera surface (issue #28); scripts/camera_soak.py is the live health check
+- Forge auth falls back to REACHY_OPENAI_API_KEY when FORGE_API_KEY is unset (one gateway, one key)
+- docs/operating-reachy.md gains the Event-based senses pipeline section; CLAUDE.md noun internals updated (FaceHook/SceneHook, forge package, [vision] extra)
+
+### Fixed
+
+- Direction invariants pinned by regression suite: raw DoA cues stay off under --transcribe, direction rides transcripts
+
+## [0.33.0] - 2026-07-17
+
+### Added
+
+- `EventBuffer.feed_pat` — head-pat detections become sense cues (`felt a gentle scratch on the head`); under `--live` the folded `PatHook` feeds one cue per reaction cycle into the shared cognition buffer, bypassing the engagement gate — touch is inherently addressed (#66)
+- 😊 contentment pose in `expressions.toml` — the natural answer to being petted; passes the distinctness check with margin
+- `apply_pose` advertises the expression catalog as a JSON-schema `enum` generated from the loaded TOML keys, so a new entry reaches the model with no code change; an unknown emoji returns an error tool-result naming the valid keys instead of silently no-oping to neutral (#67)
+- The agent system prompt names touch among the robot's perceptions
+
+### Fixed
+
+- Pat false-fire loop: `PatHook` skips sensing while a commanded move is in flight (`server.run` publishes its `busy_until` horizon) and re-baselines the detector after suspensions — the robot's own goto transit no longer reads as external force (147 false detections in 51 untouched minutes on the dev box), and real pats are no longer masked by wall-to-wall reaction windows (#66)
+
 ## [0.32.0] - 2026-07-17
 
 ### Added
