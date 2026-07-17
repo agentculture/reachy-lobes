@@ -217,14 +217,20 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local agent-tooling state (afi-cli predecessor + devex PR lifecycle)
+# Local agent-tooling state (afi-cli predecessor + agex PR lifecycle)
 .teken/
-.devex/
 .agex/
-
-# Colleague run artifacts + harness state, written by the ask-colleague skill
-# (work-item results, traces, feedback). Local-only — never committed.
-.colleague/
 
 # Per-machine skills config (copy from skills.local.yaml.example)
 skills.local.yaml
+
+# devague working state (local only — never committed; specs/plans live in docs/)
+.devague/
+
+# colleague local tooling state (traces, stat dumps, skill mirrors) — never committed
+.colleague/
+
+# devague working state (not committed by default)
+.devague/reviews/
+
+.devague/questions/

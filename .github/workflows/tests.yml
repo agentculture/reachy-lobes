@@ -29,11 +29,11 @@ jobs:
 
       - run: uv sync
 
-      - run: uv run pytest -n auto --cov=reachy_lobes --cov-report=xml:coverage.xml --cov-report=term -v
+      - run: uv run pytest -n auto --cov=reachy --cov-report=xml:coverage.xml --cov-report=term -v
 
       - name: SonarCloud Scan
         if: env.SONAR_TOKEN != ''
-        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
         env:
           SONAR_HOST_URL: https://sonarcloud.io
 
@@ -55,16 +55,16 @@ jobs:
       - run: uv sync
 
       - name: black --check
-        run: uv run black --check reachy_lobes tests
+        run: uv run black --check reachy tests
 
       - name: isort --check
-        run: uv run isort --check-only reachy_lobes tests
+        run: uv run isort --check-only reachy tests
 
       - name: flake8
-        run: uv run flake8 reachy_lobes tests
+        run: uv run flake8 reachy tests
 
       - name: bandit
-        run: uv run bandit -c pyproject.toml -r reachy_lobes
+        run: uv run bandit -c pyproject.toml -r reachy
 
       - name: markdownlint-cli2
         run: |

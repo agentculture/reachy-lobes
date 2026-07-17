@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Steward cicd workflow — thin layer over `devex pr` plus two steward
+# Steward cicd workflow — thin layer over `agex pr` plus two steward
 # extensions (`status`, `await`) for SonarCloud gating and triage flow.
 #
 # Subcommands:
-#   lint                   `devex pr lint --exit-on-violation`. Same rules
+#   lint                   `agex pr lint --exit-on-violation`. Same rules
 #                          steward used to vendor in portability-lint.sh
 #                          (which still ships for `steward doctor`).
-#   open  [gh-pr flags]    `devex pr open --delayed-read "$@"`. Creates the
+#   open  [gh-pr flags]    `agex pr open --delayed-read "$@"`. Creates the
 #                          PR, then polls 180s for an initial briefing.
 #                          Body via --body-file PATH or stdin; --title is
 #                          required.
-#   read  [PR] [--wait N]  `devex pr read "$@"`. One-shot briefing today;
+#   read  [PR] [--wait N]  `agex pr read "$@"`. One-shot briefing today;
 #                          pass --wait N to poll for reviewer readiness.
 #                          Covers what create-pr-and-wait / pr-comments /
 #                          wait-and-check / poll-readiness used to do.
-#   reply <PR>             `devex pr reply <PR>` (JSONL on stdin). devex
+#   reply <PR>             `agex pr reply <PR>` (JSONL on stdin). agex
 #                          auto-signs from culture.yaml; same JSONL
 #                          shape as the old pr-batch.sh.
-#   delta                  `devex pr delta`. Sibling alignment dump.
+#   delta                  `agex pr delta`. Sibling alignment dump.
 #
 #   status <PR>            Steward extension: pr-status.sh — SonarCloud
 #                          gate, OPEN issues, hotspots, unresolved
@@ -38,16 +38,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# devex's `--agent` flag accepts only claude-code|codex|copilot|acp. The
+# agex's `--agent` flag accepts only claude-code|codex|copilot|acp. The
 # workspace culture.yaml convention is `backend: claude`, so we always
 # pass --agent explicitly to insulate steward from that naming gap.
-# Override via STEWARD_DEVEX_AGENT if you're running under codex/copilot/acp.
-DEVEX_AGENT="${STEWARD_DEVEX_AGENT:-claude-code}"
+# Override via STEWARD_AGEX_AGENT if you're running under codex/copilot/acp.
+AGEX_AGENT="${STEWARD_AGEX_AGENT:-claude-code}"
 
-require_devex() {
-    if ! command -v devex >/dev/null 2>&1; then
-        echo "✗ devex not on PATH. Install devex (>=0.21)." >&2
-        echo "  uv tool install devex  # or pip install devex" >&2
+require_agex() {
+    if ! command -v agex >/dev/null 2>&1; then
+        echo "✗ agex not on PATH. Install agex-cli (>=0.1)." >&2
+        echo "  uv tool install agex-cli  # or pip install agex-cli" >&2
         exit 2
     fi
 }
@@ -57,38 +57,38 @@ shift || true
 
 case "$cmd" in
     lint)
-        require_devex
-        exec devex pr lint --agent "$DEVEX_AGENT" --exit-on-violation "$@"
+        require_agex
+        exec agex pr lint --agent "$AGEX_AGENT" --exit-on-violation "$@"
         ;;
     open)
-        require_devex
-        exec devex pr open --agent "$DEVEX_AGENT" --delayed-read "$@"
+        require_agex
+        exec agex pr open --agent "$AGEX_AGENT" --delayed-read "$@"
         ;;
     read)
-        require_devex
-        exec devex pr read --agent "$DEVEX_AGENT" "$@"
+        require_agex
+        exec agex pr read --agent "$AGEX_AGENT" "$@"
         ;;
     reply)
-        require_devex
+        require_agex
         PR="${1:?Usage: workflow.sh reply <PR>  (JSONL on stdin)}"
-        exec devex pr reply --agent "$DEVEX_AGENT" "$PR"
+        exec agex pr reply --agent "$AGEX_AGENT" "$PR"
         ;;
     delta)
-        require_devex
-        exec devex pr delta --agent "$DEVEX_AGENT" "$@"
+        require_agex
+        exec agex pr delta --agent "$AGEX_AGENT" "$@"
         ;;
     status)
         PR="${1:?Usage: workflow.sh status <PR>}"
         exec bash "$SCRIPT_DIR/pr-status.sh" "$PR"
         ;;
     await)
-        require_devex
+        require_agex
         PR="${1:?Usage: workflow.sh await <PR>}"
 
         # Legacy fixed-sleep escape hatch.
         if [ -n "${STEWARD_PR_AWAIT_SECONDS:-}" ]; then
             echo "warning: STEWARD_PR_AWAIT_SECONDS is deprecated; prefer STEWARD_PR_AWAIT_WAIT." >&2
-            echo "→ sleeping ${STEWARD_PR_AWAIT_SECONDS}s (legacy fixed-sleep) before devex pr read …" >&2
+            echo "→ sleeping ${STEWARD_PR_AWAIT_SECONDS}s (legacy fixed-sleep) before agex pr read …" >&2
             sleep "$STEWARD_PR_AWAIT_SECONDS"
             WAIT_ARGS=()
         else
@@ -96,18 +96,18 @@ case "$cmd" in
             WAIT_ARGS=(--wait "$WAIT")
         fi
 
-        # 1. devex pr read --wait — readiness loop + briefing.
+        # 1. agex pr read --wait — readiness loop + briefing.
         # Capture rc from the command itself (not from the negated test —
         # `if ! cmd; then rc=$?` would store the if-test status, always 0
         # in the failure branch, masking the real exit code).
-        echo "── devex pr read ──────────────────────────────────────────────────────" >&2
-        if devex pr read --agent "$DEVEX_AGENT" "$PR" "${WAIT_ARGS[@]}"; then
+        echo "── agex pr read ──────────────────────────────────────────────────────" >&2
+        if agex pr read --agent "$AGEX_AGENT" "$PR" "${WAIT_ARGS[@]}"; then
             READ_RC=0
         else
             READ_RC=$?
         fi
         if [ "$READ_RC" -ne 0 ]; then
-            echo "✗ devex pr read failed (exit $READ_RC)" >&2
+            echo "✗ agex pr read failed (exit $READ_RC)" >&2
             exit "$READ_RC"
         fi
 
