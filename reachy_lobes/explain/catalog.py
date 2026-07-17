@@ -1,7 +1,7 @@
-"""Markdown catalog for ``culture-agent-template explain <path>``.
+"""Markdown catalog for ``reachy-lobes explain <path>``.
 
 Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple
-and ``("culture-agent-template",)`` both resolve to the root entry.
+and ``("reachy-lobes",)`` both resolve to the root entry.
 
 Keep bodies self-contained: an agent reading one entry should get enough
 context without chaining reads.
@@ -10,7 +10,7 @@ context without chaining reads.
 from __future__ import annotations
 
 _ROOT = """\
-# culture-agent-template
+# reachy-lobes
 
 A clonable template for AgentCulture mesh agents. It carries an agent-first CLI
 (cited from the teken `python-cli` reference), a mesh identity (`culture.yaml` +
@@ -20,12 +20,12 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 
 ## Verbs
 
-- `culture-agent-template whoami` — identity probe from `culture.yaml`.
-- `culture-agent-template learn` — structured self-teaching prompt.
-- `culture-agent-template explain <path>` — markdown docs for any noun/verb.
-- `culture-agent-template overview` — descriptive snapshot of the agent.
-- `culture-agent-template doctor` — check the agent-identity invariants.
-- `culture-agent-template cli overview` — describe the CLI surface.
+- `reachy-lobes whoami` — identity probe from `culture.yaml`.
+- `reachy-lobes learn` — structured self-teaching prompt.
+- `reachy-lobes explain <path>` — markdown docs for any noun/verb.
+- `reachy-lobes overview` — descriptive snapshot of the agent.
+- `reachy-lobes doctor` — check the agent-identity invariants.
+- `reachy-lobes cli overview` — describe the CLI surface.
 
 ## Exit-code policy
 
@@ -36,49 +36,49 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 
 ## See also
 
-- `culture-agent-template explain whoami`
-- `culture-agent-template explain doctor`
+- `reachy-lobes explain whoami`
+- `reachy-lobes explain doctor`
 """
 
 _WHOAMI = """\
-# culture-agent-template whoami
+# reachy-lobes whoami
 
 Reports the agent's identity from `culture.yaml`: nick (`suffix`), backend,
 served model, and the package version. Read-only.
 
 ## Usage
 
-    culture-agent-template whoami
-    culture-agent-template whoami --json
+    reachy-lobes whoami
+    reachy-lobes whoami --json
 """
 
 _LEARN = """\
-# culture-agent-template learn
+# reachy-lobes learn
 
 Prints a structured self-teaching prompt covering purpose, command map,
 exit-code policy, `--json` support, and the `explain` pointer.
 
 ## Usage
 
-    culture-agent-template learn
-    culture-agent-template learn --json
+    reachy-lobes learn
+    reachy-lobes learn --json
 """
 
 _EXPLAIN = """\
-# culture-agent-template explain <path>
+# reachy-lobes explain <path>
 
 Prints markdown documentation for any noun/verb path. Unlike `--help` (terse,
 positional), `explain` is global and addressable by path.
 
 ## Usage
 
-    culture-agent-template explain culture-agent-template
-    culture-agent-template explain whoami
-    culture-agent-template explain --json <path>
+    reachy-lobes explain reachy-lobes
+    reachy-lobes explain whoami
+    reachy-lobes explain --json <path>
 """
 
 _OVERVIEW = """\
-# culture-agent-template overview
+# reachy-lobes overview
 
 Read-only descriptive snapshot of the agent: identity (from `culture.yaml`), the
 verb surface, and the sibling-pattern artifacts the template carries. Accepts an
@@ -86,12 +86,12 @@ ignored `target` so a stray path never hard-fails.
 
 ## Usage
 
-    culture-agent-template overview
-    culture-agent-template overview --json
+    reachy-lobes overview
+    reachy-lobes overview --json
 """
 
 _DOCTOR = """\
-# culture-agent-template doctor
+# reachy-lobes doctor
 
 Checks the agent-identity invariants `steward doctor` verifies:
 prompt-file-present and backend-consistency (`colleague` → `AGENTS.colleague.md`), plus a
@@ -99,26 +99,26 @@ skills-present check. Exits 1 when unhealthy.
 
 ## Usage
 
-    culture-agent-template doctor
-    culture-agent-template doctor --json
+    reachy-lobes doctor
+    reachy-lobes doctor --json
 """
 
 _CLI = """\
-# culture-agent-template cli
+# reachy-lobes cli
 
 Noun group for CLI-surface introspection. `cli overview` describes the CLI
 itself (distinct from the global `overview`, which describes the agent).
 
 ## Usage
 
-    culture-agent-template cli overview
-    culture-agent-template cli overview --json
+    reachy-lobes cli overview
+    reachy-lobes cli overview --json
 """
 
 
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
-    ("culture-agent-template",): _ROOT,
+    ("reachy-lobes",): _ROOT,
     ("whoami",): _WHOAMI,
     ("learn",): _LEARN,
     ("explain",): _EXPLAIN,
