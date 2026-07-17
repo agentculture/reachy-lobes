@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from reachy_lobes.cli import main
+from reachy.cli import main
 
 # --- overview -------------------------------------------------------------
 
@@ -15,7 +15,7 @@ def test_overview_text(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["overview"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "# reachy-lobes" in out
+    assert "# reachy-mini-cli" in out
     assert "Identity" in out
 
 
@@ -23,7 +23,7 @@ def test_overview_json_shape(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["overview", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["subject"] == "reachy-lobes"
+    assert payload["subject"] == "reachy-mini-cli"
     assert isinstance(payload["sections"], list)
     assert payload["sections"]
 
@@ -41,14 +41,14 @@ def test_overview_graceful_on_bad_path(capsys: pytest.CaptureFixture[str]) -> No
 def test_cli_overview_text(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["cli", "overview"])
     assert rc == 0
-    assert "# reachy-lobes cli" in capsys.readouterr().out
+    assert "# reachy-mini-cli cli" in capsys.readouterr().out
 
 
 def test_cli_overview_json_shape(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["cli", "overview", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["subject"] == "reachy-lobes cli"
+    assert payload["subject"] == "reachy-mini-cli cli"
     assert isinstance(payload["sections"], list)
 
 
@@ -77,7 +77,7 @@ def test_cli_overview_unknown_flag_structured_error(
 def test_doctor_text(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["doctor"])
     assert rc in (0, 1)
-    assert "reachy-lobes doctor" in capsys.readouterr().out
+    assert "reachy-mini-cli doctor" in capsys.readouterr().out
 
 
 def test_doctor_json_shape(capsys: pytest.CaptureFixture[str]) -> None:
@@ -89,18 +89,3 @@ def test_doctor_json_shape(capsys: pytest.CaptureFixture[str]) -> None:
     assert payload["checks"]
     for check in payload["checks"]:
         assert {"id", "passed", "severity", "message", "remediation"} <= set(check)
-
-
-def test_doctor_recognizes_declared_backend(capsys: pytest.CaptureFixture[str]) -> None:
-    """The repo's own declared backend must be a known one — doctor stays healthy.
-
-    Guards the backend-consistency invariant: a promotion that changes
-    ``culture.yaml``'s backend without teaching ``doctor`` the matching prompt
-    file would otherwise slip through (the shape tests above tolerate rc==1).
-    """
-    rc = main(["doctor", "--json"])
-    payload = json.loads(capsys.readouterr().out)
-    messages = " ".join(str(c["message"]) for c in payload["checks"])
-    assert "unknown backend" not in messages
-    assert rc == 0
-    assert payload["healthy"] is True

@@ -1,4 +1,4 @@
-"""Smoke tests for the reachy-lobes CLI entry point and its verbs."""
+"""Smoke tests for the reachy-mini-cli CLI entry point and its verbs."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from reachy_lobes import __version__
-from reachy_lobes.cli import main
-from reachy_lobes.explain import known_paths
+from reachy import __version__
+from reachy.cli import main
+from reachy.explain import known_paths
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -21,7 +21,7 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
 def test_no_args_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main([])
     assert rc == 0
-    assert "usage: reachy-lobes" in capsys.readouterr().out
+    assert "usage: reachy-mini-cli" in capsys.readouterr().out
 
 
 def test_unknown_command_errors(capsys: pytest.CaptureFixture[str]) -> None:
@@ -40,8 +40,8 @@ def test_whoami_text(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["whoami"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "nick: reachy-lobes" in out
-    assert "backend: colleague" in out
+    assert "nick: reachy-mini-cli" in out
+    assert "backend: claude" in out
     assert "model:" in out
 
 
@@ -49,9 +49,9 @@ def test_whoami_json(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["whoami", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["nick"] == "reachy-lobes"
+    assert payload["nick"] == "reachy-mini-cli"
     assert payload["version"] == __version__
-    assert payload["backend"] == "colleague"
+    assert payload["backend"] == "claude"
 
 
 # --- learn ----------------------------------------------------------------
@@ -62,7 +62,7 @@ def test_learn_text(capsys: pytest.CaptureFixture[str]) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert len(out) >= 200
-    assert "reachy-lobes" in out
+    assert "reachy-mini-cli" in out
     assert "Exit-code policy" in out
     assert "--json" in out
     assert "explain" in out
@@ -72,9 +72,29 @@ def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["learn", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tool"] == "reachy-lobes"
+    assert payload["tool"] == "reachy-mini-cli"
     assert payload["version"] == __version__
     assert payload["json_support"] is True
+
+
+# --- quickstart -----------------------------------------------------------
+
+
+def test_quickstart_text(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["quickstart"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "uv tool install" in out
+    assert "reachy-mini-cli[daemon]" in out
+    assert "daemon start" in out
+
+
+def test_quickstart_json(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["quickstart", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload["profiles"], list)
+    assert payload["profiles"]
 
 
 # --- explain --------------------------------------------------------------
@@ -83,11 +103,11 @@ def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
 def test_explain_root(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["explain"])
     assert rc == 0
-    assert "# reachy-lobes" in capsys.readouterr().out
+    assert "# reachy-mini-cli" in capsys.readouterr().out
 
 
 def test_explain_self(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main(["explain", "reachy-lobes"])
+    rc = main(["explain", "reachy-mini-cli"])
     assert rc == 0
     assert capsys.readouterr().out.startswith("#")
 
@@ -97,7 +117,7 @@ def test_explain_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["path"] == ["whoami"]
-    assert "reachy-lobes whoami" in payload["markdown"]
+    assert "reachy-mini-cli whoami" in payload["markdown"]
 
 
 def test_explain_unknown_path_errors(capsys: pytest.CaptureFixture[str]) -> None:

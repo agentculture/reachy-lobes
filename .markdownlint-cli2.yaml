@@ -1,4 +1,4 @@
-# markdownlint-cli2 config for reachy-lobes.
+# markdownlint-cli2 config for reachy-mini-cli.
 # markdownlint-cli2 stops walking at the git root, so a per-user global config
 # in the home directory isn't picked up from inside the repo.
 # Mirrors the guildmaster / steward / teken preset for workspace consistency.
@@ -19,5 +19,16 @@ ignores:
   - ".local/**"
   - ".afi/**"
   - ".teken/**"
+  # The virtualenv carries third-party package docs we don't lint.
+  - ".venv/**"
   # Vendored skills are cited verbatim from guildmaster — do not reformat them.
   - ".claude/skills/**"
+  # Generated devague artifacts (spec/plan exports + working state). The exporter
+  # owns their formatting; their long announcement headings end in a period by
+  # design (MD026), so don't lint them.
+  - "docs/specs/**"
+  - "docs/plans/**"
+  - ".devague/**"
+  # Colleague local tooling state (traces + vendored skill-description mirrors).
+  # Not committed; the mirrors are cited verbatim, like .claude/skills.
+  - ".colleague/**"

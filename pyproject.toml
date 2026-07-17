@@ -1,33 +1,81 @@
 [project]
-name = "reachy-lobes"
-version = "0.5.0"
-description = "The Reachy Mini expressive robot given a fully local brain: fuses reachy-mini-cli's device, app, and runtime ops with lobes-cli's locally-served vLLM model, so the robot thinks on a self-hosted model over the acp vllm-local provider — an expressive robot with a local mind."
+name = "reachy-mini-cli"
+version = "0.34.1"
+description = "Agent and CLI for operating the Reachy Mini expressive robot — device setup, app management, and runtime ops."
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.12"
 authors = [{name = "AgentCulture"}]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Software Development",
     "Intended Audience :: Developers",
 ]
-dependencies = []
+dependencies = ["numpy>=1.24", "harmonics-cli>=0.8"]
+
+# SDK-first design, installability-aware: `numpy` (the RMS loudness detector) and
+# `harmonics-cli` (the harmonic voice backend, import package `harmonics`) are the two base
+# dependencies — both are pure wheels that install everywhere. `harmonics-cli` is allowed as
+# a base dep despite the "no engine packages" rule below because it has ZERO transitive
+# runtime dependencies (its `[audio]` extra, which pulls sounddevice/numpy, is not used here),
+# is org-owned (AgentCulture), and installs cleanly even on the bare remote/HTTP profile.
+# `reachy-mini` (the SDK + daemon binary) is the DEFAULT `listen` transport but stays an
+# *extra*, because its transitive stack (pycairo / gstreamer / pyaudio) needs system libraries
+# that aren't present on a bare box or in CI. So the recommended install is
+# `pip install 'reachy-mini-cli[daemon]'` (or `[sdk]`), which the README documents; a bare
+# `pip install reachy-mini-cli` gives the HTTP remote profile, and running the SDK transport
+# without the extra raises a clean CliError pointing at `[sdk]`. (See the `version-check`/CI
+# note: a hard reachy-mini base dep breaks `uv sync` on the cairo build.)
+#
+# `[daemon]` signals "I need the reachy-mini-daemon binary" and `[sdk]` signals "I need the
+# in-process SDK client" — both resolve to the same reachy-mini wheel.
+[project.optional-dependencies]
+# Pinned to the 1.9.x line so the in-process SDK client matches the
+# reachy-mini-daemon binary that ships in the same wheel: a client/daemon version
+# skew (e.g. installed SDK 1.7.3 vs daemon 1.9.0) emits a RuntimeWarning at client
+# open and silently breaks the camera media path (all-None frames). Keeping both
+# extras on the same 1.9.x wheel is what keeps client and daemon in lockstep. The
+# `<1.10` upper bound guards against the next minor's API changes re-introducing
+# the same skew class (the camera surface already moved once: 1.7 → 1.9).
+daemon = ["reachy-mini>=1.9.0,<1.10"]
+sdk = ["reachy-mini>=1.9.0,<1.10"]
+# Generic compute-class extras — intentionally broad so they also serve future
+# features beyond wake detection.
+# [cpu] is the home for on-box openwakeword (lazy-loaded; openwakeword lacks a
+# cp312 wheel as of 2026-06, so the dep list stays empty until it gains one).
+# [gpu] is a generic GPU compute-class pin for future GPU-accelerated features;
+# it does NOT bundle an on-box STT model — heavy STT is externally managed
+# behind the HTTP STT service (REACHY_STT_URL).  The code tolerates a missing
+# engine (lazy import + graceful Tier-1 degrade).
+# Do NOT promote any engine package to base dependencies.
+cpu = []
+gpu = []
+# [vision] — OpenCV (headless: no GTK/Qt GUI bindings needed on a headless
+# robot box) for the face-recognition engine (reachy/vision/face.py, ported
+# from reachy_nova's YuNet+SFace face_recognition.py + face_manager.py). Like
+# [sdk]/[daemon]/[cpu], this is lazy-imported and stays an extra rather than a
+# base dep — cv2 is a much heavier wheel than numpy/harmonics-cli, and the
+# bare-install HTTP remote profile has no camera to run it against anyway. A
+# missing extra raises the same clean exit-2 CliError pattern as the other
+# lazy-imported engines.
+vision = ["opencv-python-headless>=4.9,<5"]
 
 [project.urls]
-Homepage = "https://github.com/agentculture/reachy-lobes"
-Issues = "https://github.com/agentculture/reachy-lobes/issues"
+Homepage = "https://github.com/agentculture/reachy-mini-cli"
+Issues = "https://github.com/agentculture/reachy-mini-cli/issues"
 
 [project.scripts]
-reachy-lobes = "reachy_lobes.cli:main"
+reachy = "reachy.cli:main"
+reachy-mini-cli = "reachy.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["reachy_lobes"]
+packages = ["reachy"]
 
 [dependency-groups]
 dev = [
@@ -42,11 +90,8 @@ dev = [
 ]
 
 [tool.coverage.run]
-source = ["reachy_lobes"]
-omit = ["reachy_lobes/__pycache__/*"]
-# Emit repo-relative paths in coverage.xml so SonarCloud maps them to
-# sonar.sources=reachy_lobes (absolute/.venv paths fail to map → empty coverage).
-relative_files = true
+source = ["reachy"]
+omit = ["reachy/__pycache__/*"]
 
 [tool.coverage.report]
 fail_under = 60
@@ -60,7 +105,7 @@ exclude_lines = [
 [tool.isort]
 profile = "black"
 line_length = 100
-known_first_party = ["reachy_lobes"]
+known_first_party = ["reachy"]
 
 [tool.black]
 line-length = 100
